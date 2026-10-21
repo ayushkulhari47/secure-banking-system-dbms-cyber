@@ -1,3 +1,22 @@
+-- =============================================================================
+-- triggers.sql  --  LEGACY / REFERENCE ONLY (MySQL design, NOT used in production)
+-- =============================================================================
+-- IMPORTANT: These triggers are written in MySQL 8 dialect (DELIMITER, SIGNAL
+-- SQLSTATE, etc.) and are NOT compatible with SQLite.
+--
+-- The production application (db.py) implements equivalent logic in Python:
+--
+--   MySQL Trigger           -> Python equivalent in db.py / app.py
+--   ---------------------------------------------------------------
+--   after_failed_login      -> db.increment_failed_attempts()     (db.py L215)
+--                              + db.raise_alert() "Brute Force"   (app.py L76)
+--   after_transaction       -> db.log_action()                    (db.py L280)
+--                              + db.raise_alert() "Large Txn"     (app.py L141)
+--   after_user_login        -> db.log_action() "Successful login" (app.py L66)
+--
+-- This file is kept for academic reference to show the original MySQL design.
+-- =============================================================================
+
 DELIMITER $$
 
 CREATE TRIGGER after_failed_login

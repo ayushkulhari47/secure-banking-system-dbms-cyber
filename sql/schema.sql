@@ -1,51 +1,81 @@
-CREATE DATABASE IF NOT EXISTS secure_banking;
-USE secure_banking;
+-- =============================================================================
+-- schema.sql  --  ACTUAL PRODUCTION SCHEMA (SQLite / sqlite3)
+-- =============================================================================
+-- This file documents the exact DDL used by db.py (SCHEMA_SQL constant).
+-- The application uses Python's built-in sqlite3 module with:
+--   isolation_level = None  (manual BEGIN / COMMIT / ROLLBACK)
+--   PRAGMA foreign_keys = ON
+--
+-- NOTE: The application creates and migrates this schema automatically via
+--       db.init_db().  You do NOT need to run this file manually.
+--       It is provided here for review and documentation purposes only.
+-- =============================================================================
 
-CREATE TABLE Users (
-    user_id INT AUTO_INCREMENT PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    password_hash VARCHAR(255) NOT NULL,
-    role ENUM('admin', 'user') DEFAULT 'user',
-    failed_attempts INT DEFAULT 0,
-    is_locked BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+PRAGMA foreign_keys = ON;
+
+-- Users table: stores credentials (bcrypt-hashed), role, and lockout state.
+CREATE TABLE IF NOT EXISTS Users (
+    user_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT    NOT NULL,
+    email           TEXT    UNIQUE NOT NULL,
+    password_hash   TEXT    NOT NULL,          -- bcrypt, work factor 12, random salt
+    role            TEXT    NOT NULL DEFAULT 'user'
+                            CHECK(role IN ('admin','user')),
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    is_locked       INTEGER NOT NULL DEFAULT 0, -- 0 = unlocked, 1 = locked
+    created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE Accounts (
-    account_id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id INT NOT NULL,
-    balance DECIMAL(15, 2) DEFAULT 0.00,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES Users(user_id)
+-- Accounts table: one account per user; balance cannot go negative (DB constraint).
+CREATE TABLE IF NOT EXISTS Accounts (
+    account_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL REFERENCES Users(user_id),
+    balance    REAL    NOT NULL DEFAULT 0.00
+                       CHECK(balance >= 0),     -- prevents overdraft at DB level
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE Transactions (
-    txn_id INT AUTO_INCREMENT PRIMARY KEY,
-    from_account INT,
-    to_account INT,
-    amount DECIMAL(15, 2) NOT NULL,
-    txn_type ENUM('deposit', 'withdraw', 'transfer') NOT NULL,
-    txn_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (from_account) REFERENCES Accounts(account_id),
-    FOREIGN KEY (to_account) REFERENCES Accounts(account_id)
+-- Transactions table: immutable ledger of all financial movements.
+--   status: 'completed' for immediate transfers/deposits/withdrawals;
+--           'pending'   for Maker-Checker high-value transfers awaiting approval;
+--           'rejected'  for declined pending transfers.
+CREATE TABLE IF NOT EXISTS Transactions (
+    txn_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_account INTEGER REFERENCES Accounts(account_id),  -- NULL for deposits
+    to_account   INTEGER REFERENCES Accounts(account_id),  -- NULL for withdrawals
+    amount       REAL    NOT NULL CHECK(amount > 0),        -- negative amounts blocked at DB level
+    txn_type     TEXT    NOT NULL
+                         CHECK(txn_type IN ('deposit','withdraw','transfer')),
+    status       TEXT    NOT NULL DEFAULT 'completed'
+                         CHECK(status IN ('completed','pending','rejected')),
+    txn_time     TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE TABLE Audit_Log (
-    log_id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id INT,
-    action VARCHAR(255) NOT NULL,
-    ip_address VARCHAR(50),
-    log_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES Users(user_id)
+-- Audit_Log table: append-only, tamper-evident log using SHA-256 hash chaining.
+--   previous_hash: entry_hash of the immediately preceding log row.
+--   entry_hash:    SHA-256( previous_hash || user_id || action || log_time )
+--   Genesis entry uses previous_hash = '000...0' (64 zeroes).
+--   user_id may be NULL for pre-authentication events (e.g. unknown-email attempts).
+CREATE TABLE IF NOT EXISTS Audit_Log (
+    log_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       INTEGER,                     -- nullable: unknown-email login attempts
+    action        TEXT NOT NULL,
+    log_time      TEXT NOT NULL DEFAULT (datetime('now')),
+    previous_hash TEXT,                        -- hash of preceding log entry
+    entry_hash    TEXT                         -- SHA-256 hash of this entry
 );
 
-CREATE TABLE Alerts (
-    alert_id INT AUTO_INCREMENT PRIMARY KEY,
-    user_id INT,
-    alert_type VARCHAR(100) NOT NULL,
-    description VARCHAR(255),
-    status ENUM('open', 'resolved') DEFAULT 'open',
-    alert_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES Users(user_id)
+-- Alerts table: security incidents raised by the application.
+--   severity: 'low', 'medium', or 'high'.
+--   status:   'open' (unresolved) or 'resolved' (remediated by admin).
+CREATE TABLE IF NOT EXISTS Alerts (
+    alert_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER REFERENCES Users(user_id),
+    alert_type  TEXT    NOT NULL,
+    description TEXT,
+    severity    TEXT    NOT NULL DEFAULT 'medium'
+                        CHECK(severity IN ('low','medium','high')),
+    status      TEXT    NOT NULL DEFAULT 'open'
+                        CHECK(status IN ('open','resolved')),
+    alert_time  TEXT    NOT NULL DEFAULT (datetime('now'))
 );

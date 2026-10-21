@@ -22,14 +22,14 @@ A hardened, transactional banking core and cybersecurity compliance demonstratio
 | **Safe Input Exception Handling** | Wraps user CLI input conversion in structured exception blocks, preventing application crashes on non-numeric inputs. | **Preventive** | [security.py:safe_float_input](security.py#L68), `safe_int_input` |
 | **Self-Transfer Restriction** | Intercepts attempts to transfer funds to one's own account, preventing artificial audit trail inflation. | **Preventive** | [app.py:do_transfer](app.py#L174) |
 | **Inactivity Session Timeout** | Enforces automatic session termination and logout after 300 seconds of inactivity using monotonic system clocks. | **Preventive** | [security.py:Session](security.py#L141), [app.py:menu](app.py#L457) |
-| **Role-Based Access Control (RBAC)** | Restricts transaction history to account owners; reserves audit logs, alert consoles, and approval queues strictly to administrators. | **Preventive** | [app.py:view_transactions](app.py#L231), `view_audit_log`, `view_alerts` |
+| **Role-Based Access Control (RBAC)** | Restricts transaction history to account owners; reserves audit logs, alert consoles, and approval queues strictly to administrators. | **Preventive** | [app.py:view_transactions](app.py#L241), [app.py:view_audit_log](app.py#L270), [app.py:view_alerts](app.py#L287) |
 | **Maker-Checker Dual Control** | Quarantines transfers > Rs 50,000 in `pending` state; enforces Segregation of Duties (maker is barred from self-approving). | **Preventive** | [db.py:create_pending_transfer](db.py#L628), `approve_pending_transfer`, [app.py:do_transfer](app.py#L198) |
 | **Centralized Security Configuration** | Consolidates all operational thresholds in an auditable configuration module to avoid magic numbers. | **Preventive** | [config.py](config.py) |
 | **Comprehensive Event Logging** | Logs all security-relevant events, logins (including unknown emails), financial operations, and administrative overrides. | **Detective** | [db.py:log_action](db.py#L280) |
 | **Tamper-Evident Audit Hash Chain** | Links audit log entries via SHA-256 hash chaining (`previous_hash` & `entry_hash`), enabling cryptographic proof of record integrity. | **Detective** | [db.py:compute_audit_hash](db.py#L271), `verify_audit_log_integrity` |
 | **Automated Security Alerting** | Raises categorized security alerts with severity ratings (`low`, `medium`, `high`) on brute force and high-value movements. | **Detective** | [db.py:raise_alert](db.py#L380), [app.py](app.py) |
-| **Admin Account Unlock** | Provides authorized administrators with a corrective remediation function to unlock locked accounts and reset counters. | **Corrective** | [db.py:unlock_user](db.py#L344), [app.py:manage_locked_users](app.py#L354) |
-| **Security Alert Remediation** | Enables security operators to investigate incidents, document corrective actions, and transition alerts to `resolved`. | **Corrective** | [db.py:resolve_alert](db.py#L399), [app.py:manage_alerts](app.py#L387) |
+| **Admin Account Unlock** | Provides authorized administrators with a corrective remediation function to unlock locked accounts and reset counters. | **Corrective** | [db.py:unlock_user](db.py#L357), [app.py:manage_locked_users](app.py#L362) |
+| **Security Alert Remediation** | Enables security operators to investigate incidents, document corrective actions, and transition alerts to `resolved`. | **Corrective** | [db.py:resolve_alert](db.py#L417), [app.py:manage_alerts](app.py#L397) |
 
 ---
 
@@ -86,13 +86,14 @@ secure-banking-system/
 │   ├── PIA.md                    # Privacy Impact Assessment aligned with India's DPDP Act 2023
 │   ├── bcp_dr.md                 # Business Continuity, Disaster Recovery & Incident Response SOP
 │   ├── control_testing.md        # Formal IT Audit control testing workpaper (100% effective)
+│   ├── security_assessment_report.md # Vulnerability remediation audit report & evidence matrix
 │   ├── demo_script.md            # Step-by-step 2-minute interview demonstration script
 │   └── presentation_outline.md   # 5-slide presentation deck outline + 8 interview Q&As
 ├── sql/
-│   ├── schema.sql                # Relational MySQL/SQLite schema definition
-│   ├── procedures.sql            # Stored procedure specifications for banking operations
-│   ├── triggers.sql              # Database triggers for intrusion detection & alerts
-│   └── queries.sql               # Analytic and diagnostic SQL audit queries
+│   ├── schema.sql                # Real SQLite DDL matching db.py SCHEMA_SQL (authoritative)
+│   ├── procedures.sql            # Legacy MySQL stored procedures (reference only, not used)
+│   ├── triggers.sql              # Legacy MySQL triggers (reference only, not used)
+│   └── queries.sql               # Diagnostic SQL queries + legacy MySQL seed (reference only)
 ├── tests/
 │   ├── __init__.py
 │   ├── test_database.py          # 18 tests for schema constraints, ACID transactions, and rollback
@@ -106,6 +107,7 @@ secure-banking-system/
 ├── requirements.txt              # Pinned external dependencies (bcrypt, pytest)
 ├── .gitignore                    # Ignores runtime artifacts (banking.db, backups/, cache)
 ├── LICENSE                       # MIT License
+├── SECURITY.md                   # Security vulnerability reporting policy & prototype disclaimer
 └── README.md                     # System documentation and compliance report
 ```
 
@@ -158,7 +160,108 @@ python app.py
 
 ---
 
-## 6. How to Run Tests
+## 6. Demo Output (Live Terminal Capture)
+
+Below is an authentic execution log captured directly from the hardened banking system demonstrating key cybersecurity controls:
+
+### Scenario A: Authentication & Standard User Session
+```text
+--- Login ---
+Email: rahul@bank.com
+Password: rahul123
+
+Welcome Rahul Sharma!  Role: user
+
+--- Banking Menu (USER) --- [session expires in 5m 0s]
+1. View Balance
+2. Deposit
+3. Withdraw
+4. Transfer
+5. Transaction History
+6. Audit Log        (admin only)
+7. Security Alerts  (admin only)
+8. Logout
+
+Choose: 1
+
+Account ID: 2  |  Balance: Rs25000.00
+```
+
+### Scenario B: Negative Amount Exploit Prevention
+```text
+Choose: 4
+Enter destination account ID: 1
+Enter transfer amount (Rs): -5000
+  [!] Invalid amount: Amount must be greater than Rs0.00 (got Rs-5000.00).
+```
+
+### Scenario C: Online Brute-Force Account Lockout
+```text
+Email: priya@bank.com
+Password: wrongpassword
+Wrong password! Attempt 1/3
+
+Email: priya@bank.com
+Password: wrongpassword
+Wrong password! Attempt 2/3
+
+Email: priya@bank.com
+Password: wrongpassword
+Too many failed attempts -- your account is now locked.
+
+--- Verification: correct password after lockout ---
+Email: priya@bank.com
+Password: priya123
+Account is locked due to multiple failed attempts. Contact admin.
+```
+
+### Scenario D: Role-Based Access Control (RBAC) Enforcement
+```text
+Choose: 6
+  [!] Access denied -- admin only.
+Choose: 7
+  [!] Access denied -- admin only.
+```
+
+### Scenario E: Maker-Checker Dual Control on High-Value Transfer (> Rs 50,000)
+```text
+Choose: 4
+Enter destination account ID: 1
+Enter transfer amount (Rs): 60000
+
+  [!] Large Transaction Notice (Maker-Checker Control):
+      Transfer of Rs60,000.00 exceeds policy limit of Rs50,000.00.
+      Transaction #1 has been submitted with status 'pending'.
+      Dual-control policy requires an administrator/checker to approve before execution.
+
+Choose: 1
+
+Account ID: 2  |  Balance: Rs25000.00  (unchanged -- funds not deducted)
+```
+
+### Scenario F: Cryptographic Audit Log Integrity Verification
+```text
+--- Login ---
+Email: ayush@bank.com
+Password: ayush123
+
+Welcome Ayush Kulhari!  Role: admin
+Choose: 10
+
+--- Audit Log Cryptographic Integrity Verification ---
+  [+] INTEGRITY PASS: All cryptographic SHA-256 hash chains match.
+      No records have been modified, deleted, or inserted out of order.
+```
+
+### Scenario G: Automated Test Suite Execution
+```text
+$ python -m pytest tests/ -q
+74 passed in 12.80s
+```
+
+---
+
+## 7. How to Run Tests
 
 The test suite contains **74 automated tests** covering database constraints, security controls, and cyber risk management features. All tests execute hermetically using in-memory SQLite connections or isolated temporary directories.
 
@@ -174,19 +277,19 @@ python -m pytest tests/ -v
 
 ---
 
-## 7. Threat Model
+## 8. Threat Model
 
 | Threat | Attack Scenario | Implemented Mitigating Control | Code Implementation |
 |---|---|---|---|
-| **Brute Force Credential Guessing** | Attacker repeatedly guesses passwords via automated script. | Account locks out after 3 failed attempts (`MAX_FAILED_LOGINS`); high-severity alert created; failed attempts counter persisted in database. | [db.py:increment_failed_attempts](db.py#L210), [app.py:login](app.py#L69) |
+| **Brute Force Credential Guessing** | Attacker repeatedly guesses passwords via automated script. | Account locks out after 3 failed attempts (`MAX_FAILED_LOGINS`); high-severity alert created; failed attempts counter persisted in database. | [db.py:increment_failed_attempts](db.py#L215), [app.py:login](app.py#L36) |
 | **Negative Amount Theft Exploit** | Attacker initiates transfer with negative amount (e.g., `-5000`), draining victim account and artificially increasing attacker balance. | Multi-layer validation: application rejects negative/zero/NaN/Inf values (`MIN_AMOUNT=0.01`); database enforces `CHECK(amount > 0)` and `CHECK(balance >= 0)`. | [security.py:validate_amount](security.py#L35), [db.py:SCHEMA_SQL](db.py#L69) |
-| **Privilege Escalation & BOLA** | Standard user accesses admin audit logs, security alerts, or views other users' confidential bank statements. | Role-Based Access Control (RBAC): non-admin requests to sensitive views are denied, and unauthorized attempts are logged to the audit log. | [app.py:view_audit_log](app.py#L254), `view_alerts`, `view_transactions` |
+| **Privilege Escalation & BOLA** | Standard user accesses admin audit logs, security alerts, or views other users' confidential bank statements. | Role-Based Access Control (RBAC): non-admin requests to sensitive views are denied, and unauthorized attempts are logged to the audit log. | [app.py:view_audit_log](app.py#L270), [app.py:view_alerts](app.py#L287), [app.py:view_transactions](app.py#L241) |
 | **Audit Log Tampering & Repudiation** | Malicious insider or intruder modifies or deletes audit log rows in the database to conceal illicit financial actions. | Cryptographic SHA-256 hash chaining: each audit row incorporates the hash of the previous row. `verify_audit_log_integrity()` recalculates hashes and pinpoints modified rows. | [db.py:compute_audit_hash](db.py#L271), `verify_audit_log_integrity` |
 | **Unauthorized Large Fund Transfers** | Rogue insider or compromised user attempts large single-point transfer. | Maker-Checker dual control: transfers > Rs 50,000 are placed in `pending` status without deducting funds; Segregation of Duties bars the maker from self-approving. | [db.py:create_pending_transfer](db.py#L628), `approve_pending_transfer`, [app.py:do_transfer](app.py#L198) |
 
 ---
 
-## 8. Vulnerabilities Found and Fixed
+## 9. Vulnerabilities Found and Fixed
 
 | # | Vulnerability (Phase 0 Finding) | Before (Vulnerable State) | After (Hardened State) |
 |---|---|---|---|
@@ -203,7 +306,7 @@ python -m pytest tests/ -v
 
 ---
 
-## 9. Compliance Documents
+## 10. Compliance Documents
 
 All compliance and governance workpapers are located in the [docs/](docs/) directory:
 
@@ -212,12 +315,13 @@ All compliance and governance workpapers are located in the [docs/](docs/) direc
 - [docs/PIA.md](docs/PIA.md): Privacy Impact Assessment evaluating personal data flows under India's Digital Personal Data Protection (DPDP) Act 2023.
 - [docs/bcp_dr.md](docs/bcp_dr.md): Business Continuity, Disaster Recovery objectives (RTO $\le$ 15m, RPO $\le$ 1h), and NIST SP 800-61 Incident Response SOP.
 - [docs/control_testing.md](docs/control_testing.md): Formal IT Audit control testing workpaper documenting operating effectiveness across all 74 test cases.
+- [docs/security_assessment_report.md](docs/security_assessment_report.md): Formal IT Security Assessment & Vulnerability Remediation Report documenting findings, recommendations, and test verification.
 - [docs/demo_script.md](docs/demo_script.md): Step-by-step 2-minute live interview demonstration script with exact inputs and outputs.
 - [docs/presentation_outline.md](docs/presentation_outline.md): 5-slide interview pitch deck outline and 8 Big-4 IT audit interview questions & model answers.
 
 ---
 
-## 10. Known Limitations and Future Work
+## 11. Known Limitations and Future Work
 
 To maintain audit transparency, the following technical limitations of this academic prototype are acknowledged:
 1. **Console CLI Interface:** The current prototype operates over a local CLI terminal. Production deployment would require an API backend (e.g., FastAPI / Django REST) over TLS 1.3.
@@ -227,7 +331,7 @@ To maintain audit transparency, the following technical limitations of this acad
 
 ---
 
-## 11. Author and License
+## 12. Author and License
 
 - **Author:** Ayush Kulhari (B.Tech Computer Science & Engineering)
 - **Target Specialization:** Cyber Risk & Compliance / IT Audit / Information Security
