@@ -205,3 +205,26 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# SQLite & local database files
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+banking.db*
+backups/
+
+# Environments & sensitive files
+.env
+.env.*
+venv/
+.venv/
+env/
+ENV/
+
+# Caches & test artifacts
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
