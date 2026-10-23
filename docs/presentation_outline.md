@@ -47,7 +47,7 @@
 - **Bullets:**
   - *ISO 27001 Annex A Mapping:* Traceability matrix covering 16 controls across Organizational (A.5) and Technological (A.8) themes.
   - *DPDP Act 2023 Alignment:* Full Privacy Impact Assessment documenting lawful processing grounds (Sec. 4), data minimisation, and data principal rights.
-  - *Automated Control Evidence:* 74 hermetic pytest tests serving as continuous, verifiable audit evidence workpapers.
+  - *Automated Control Evidence:* 123 hermetic pytest tests serving as educational, repeatable evidence for the SQLite path.
   - *Operational Resilience:* Disaster recovery protocol with defined RTO ($\le 15\text{m}$) and RPO ($\le 1\text{h}$) supported by zero-downtime hot backups.
 - **Speaker Notes:**  
   *"In IT audit and cyber risk consulting, code is only as good as its governance trail. We created formal compliance artifacts: a Risk & Control Matrix mapped to ISO 27001:2022, a DPDP Act Privacy Impact Assessment, and an IT Risk Register. Every control is directly backed by an automated test case."*
@@ -119,7 +119,7 @@
 > *"In a SOC 1 (SSAE 18) engagement focused on Internal Controls over Financial Reporting (ICFR) or a SOC 2 review under Trust Services Criteria:
 > 1. **ITGC Walkthroughs:** I would evaluate Logical Access (user provisioning, password parameters in `config.py`, lockout controls), Change Management (how thresholds are approved and modified), and Computer Operations (backup job logs and integrity checks).
 > 2. **Test of Design (TOD):** Review whether the control design addresses the risk (e.g., does the SoD check actually prevent the maker from approving their own transfer?).
-> 3. **Test of Operating Effectiveness (TOE):** Inspect audit logs and run automated control tests (such as our 74 pytest assertions) to verify that the control operated consistently across the audit period without exceptions."*
+> 3. **Test of Operating Effectiveness (TOE):** Inspect audit logs and run automated control tests (such as the current 123 pytest assertions) to verify behavior in the tested SQLite environment; do not treat this prototype as a certification."*
 
 ---
 

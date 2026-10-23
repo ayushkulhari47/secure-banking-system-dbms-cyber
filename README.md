@@ -1,12 +1,12 @@
 # Secure Banking System
 
 [![Tests](https://github.com/ayushkulhari47/secure-banking-system-dbms-cyber/actions/workflows/tests.yml/badge.svg)](https://github.com/ayushkulhari47/secure-banking-system-dbms-cyber/actions/workflows/tests.yml)
-[![Status](https://img.shields.io/badge/Status-Complete-brightgreen.svg)](#)
+[![Status](https://img.shields.io/badge/Status-Educational%20Prototype-yellow.svg)](#)
 [![Compliance](https://img.shields.io/badge/Compliance-ISO%2027001%20%7C%20DPDP%202023-blue.svg)](docs/control_mapping.md)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A hardened, transactional banking core and cybersecurity compliance demonstration built in Python and SQLite. The project simulates a resilient retail banking ledger incorporating multi-layer defense-in-depth, cryptographic credential protection via salted `bcrypt`, role-based access control (RBAC), monotonic session inactivity timeouts, Maker-Checker dual authorization for high-value fund movements, and a tamper-evident audit trail secured by cryptographic SHA-256 hash chaining. Designed and structured for IT Audit, Cyber Risk & Controls, and Information Security Governance reviews.
+A hardened, transactional banking core and cybersecurity compliance demonstration built in Python with SQLite and an explicitly configured MySQL path. The project simulates a resilient retail banking ledger incorporating multi-layer defense-in-depth, cryptographic credential protection via salted `bcrypt`, role-based access control (RBAC), monotonic session inactivity timeouts, Maker-Checker dual authorization for high-value fund movements, and a tamper-evident audit trail secured by cryptographic SHA-256 hash chaining. It is an educational prototype, not production banking software.
 
 ---
 
@@ -29,7 +29,7 @@ A hardened, transactional banking core and cybersecurity compliance demonstratio
 | **Tamper-Evident Audit Hash Chain** | Links audit log entries via SHA-256 hash chaining (`previous_hash` & `entry_hash`), enabling cryptographic proof of record integrity. | **Detective** | [db.py:compute_audit_hash](db.py#L271), `verify_audit_log_integrity` |
 | **Automated Security Alerting** | Raises categorized security alerts with severity ratings (`low`, `medium`, `high`) on brute force and high-value movements. | **Detective** | [db.py:raise_alert](db.py#L380), [app.py](app.py) |
 | **Admin Account Unlock** | Provides authorized administrators with a corrective remediation function to unlock locked accounts and reset counters. | **Corrective** | [db.py:unlock_user](db.py#L357), [app.py:manage_locked_users](app.py#L362) |
-| **Security Alert Remediation** | Enables security operators to investigate incidents, document corrective actions, and transition alerts to `resolved`. | **Corrective** | [db.py:resolve_alert](db.py#L417), [app.py:manage_alerts](app.py#L397) |
+| **Security Alert Remediation** | Enables administrators to investigate incidents and transition alerts through `open` → `reviewed` → `closed` with attribution. | **Corrective** | [db.py:review_alert](db.py), [db.py:close_alert](db.py), [app.py:manage_alerts](app.py) |
 
 ---
 
@@ -66,9 +66,9 @@ graph TD
 ## 3. Tech Stack
 
 - **Core Programming Language:** Python 3.10+ (tested on Python 3.14)
-- **Database Engine:** SQLite 3 (utilizing native standard library `sqlite3` with `PRAGMA foreign_keys = ON` and explicit transaction control `isolation_level=None`)
+- **Database Engine:** SQLite 3 for the hermetic test path and MySQL 8+ for the provisioned runtime path. A MySQL failure is fatal; the application never silently changes database engines.
 - **Authentication & Cryptography:** `bcrypt>=4.0.0` (adaptive work factor 12), `hashlib` (SHA-256 hash chaining)
-- **Testing Framework:** `pytest>=7.0.0` (74 automated unit, integration, and control tests)
+- **Testing Framework:** `pytest` (123 automated unit, integration, and control tests in the current working copy)
 - **CI/CD Pipeline:** GitHub Actions
 
 ---
@@ -85,7 +85,7 @@ secure-banking-system/
 │   ├── risk_register.md          # 5x5 IT Risk Register evaluating 10 threat scenarios
 │   ├── PIA.md                    # Privacy Impact Assessment aligned with India's DPDP Act 2023
 │   ├── bcp_dr.md                 # Business Continuity, Disaster Recovery & Incident Response SOP
-│   ├── control_testing.md        # Formal IT Audit control testing workpaper (100% effective)
+│   ├── control_testing.md        # Educational control-testing workpaper and scope limits
 │   ├── security_assessment_report.md # Vulnerability remediation audit report & evidence matrix
 │   ├── demo_script.md            # Step-by-step 2-minute interview demonstration script
 │   └── presentation_outline.md   # 5-slide presentation deck outline + 8 interview Q&As
@@ -142,11 +142,30 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Step 4: Run Application (Auto-Seeds Database)
+### Step 4: Choose the database engine
+
+For the default local demo, keep `DB_TYPE=sqlite` in `.env` and run:
+
 ```bash
 python app.py
 ```
-*Note: On first startup, `db.init_db()` automatically creates `banking.db`, applies schema constraints, and seeds initial demo users and accounts.*
+On first SQLite startup, `db.init_db()` creates `banking.db`, applies schema
+constraints, and seeds the dummy demo users and accounts.
+
+For MySQL, provisioning and runtime credentials are deliberately separate:
+
+```bash
+# .env: set DB_TYPE=mysql, DB_ADMIN_USER/DB_ADMIN_PASSWORD,
+# DB_APP_PASSWORD, host, port, and database name
+python setup_db.py
+
+# Then set DB_USER=bank_app and DB_PASSWORD=<DB_APP_PASSWORD> in .env
+python verify_least_privilege.py
+python app.py
+```
+
+The application does not create MySQL databases, run DDL, or fall back to
+SQLite when MySQL is unavailable. `setup_db.py` is the only provisioning path.
 
 ### Demo Credentials (Strictly for Testing & Demonstrations)
 > [!CAUTION]
@@ -256,14 +275,14 @@ Choose: 10
 ### Scenario G: Automated Test Suite Execution
 ```text
 $ python -m pytest tests/ -q
-74 passed in 12.80s
+123 passed
 ```
 
 ---
 
 ## 7. How to Run Tests
 
-The test suite contains **74 automated tests** covering database constraints, security controls, and cyber risk management features. All tests execute hermetically using in-memory SQLite connections or isolated temporary directories.
+The current suite contains **123 automated tests** covering database constraints, security controls, authentication privacy, alert workflow, backup/restore, and cyber risk management features. Tests run hermetically against isolated SQLite databases; the MySQL provisioning and privilege-denial script require a configured MySQL service.
 
 ```bash
 # Run all tests with verbose output
@@ -273,7 +292,8 @@ python -m pytest tests/ -v
 ### Test Coverage Summary:
 - **`tests/test_database.py` (18 tests):** Schema constraints (`CHECK(balance >= 0)`, `CHECK(amount > 0)`, `role IN ('admin','user')`), email uniqueness, atomic deposit/withdraw/transfer, and transaction rollback verification.
 - **`tests/test_security_fixes.py` (42 tests):** Amount validation (rejection of zero, negative, NaN, Inf), safe numeric input wrappers, password complexity validation, session inactivity tracking, self-transfer prevention, bcrypt hash generation/verification, and RBAC privilege checks.
-- **`tests/test_cyber_controls.py` (14 tests):** Centralized configuration integrity, cryptographic audit log hash chaining, tamper detection on falsified records or broken links, Maker-Checker pending queues, Segregation of Duties (maker self-approval block), checker approval/rejection, admin account unlock, and alert resolution.
+- **`tests/test_cyber_controls.py` (16 tests):** Centralized configuration integrity, cryptographic audit log hash chaining, tamper detection on falsified records or broken links, Maker-Checker pending queues, Segregation of Duties (maker self-approval block), checker approval/rejection, admin account unlock, and the open → reviewed → closed alert workflow.
+- **`tests/test_phase3.py` (40 tests):** Password changes, SQLi and velocity detectors, fail-closed database selection, generic login errors, odd-hour detection, atomic banking operations, and amount validation.
 
 ---
 
@@ -314,7 +334,7 @@ All compliance and governance workpapers are located in the [docs/](docs/) direc
 - [docs/risk_register.md](docs/risk_register.md): Big-4 style $5 \times 5$ qualitative IT Risk Register evaluating 10 key threat scenarios and residual risks.
 - [docs/PIA.md](docs/PIA.md): Privacy Impact Assessment evaluating personal data flows under India's Digital Personal Data Protection (DPDP) Act 2023.
 - [docs/bcp_dr.md](docs/bcp_dr.md): Business Continuity, Disaster Recovery objectives (RTO $\le$ 15m, RPO $\le$ 1h), and NIST SP 800-61 Incident Response SOP.
-- [docs/control_testing.md](docs/control_testing.md): Formal IT Audit control testing workpaper documenting operating effectiveness across all 74 test cases.
+- [docs/control_testing.md](docs/control_testing.md): Educational control-testing workpaper documenting the current SQLite evidence and its scope limits.
 - [docs/security_assessment_report.md](docs/security_assessment_report.md): Formal IT Security Assessment & Vulnerability Remediation Report documenting findings, recommendations, and test verification.
 - [docs/demo_script.md](docs/demo_script.md): Step-by-step 2-minute live interview demonstration script with exact inputs and outputs.
 - [docs/presentation_outline.md](docs/presentation_outline.md): 5-slide interview pitch deck outline and 8 Big-4 IT audit interview questions & model answers.

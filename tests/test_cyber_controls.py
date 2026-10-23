@@ -12,7 +12,6 @@ Run: pytest tests/test_cyber_controls.py -v
 """
 
 import os
-import sqlite3
 import pytest
 
 import config
@@ -28,6 +27,7 @@ def test_db(tmp_path, monkeypatch):
     """
     temp_db_path = str(tmp_path / "test_banking.db")
     monkeypatch.setattr(db, "DB_PATH", temp_db_path)
+    monkeypatch.setattr(db, "DB_TYPE", "sqlite")
     db.init_db()
     return temp_db_path
 
@@ -35,6 +35,7 @@ def test_db(tmp_path, monkeypatch):
 # ===========================================================================
 # 1. Centralized Security Configuration (ISO 27001 A.12.1.1)
 # ===========================================================================
+
 
 class TestCentralizedConfiguration:
     """Control: Tuneable parameters must be centralized and properly typed."""
@@ -57,10 +58,30 @@ class TestCentralizedConfiguration:
         assert config.MAX_AMOUNT == 1_000_000.00
         assert config.BCRYPT_ROUNDS == 12
 
+    def test_database_configuration_constants_exist(self):
+        assert hasattr(config, "DB_TYPE")
+        assert hasattr(config, "DB_PATH")
+        assert hasattr(config, "DB_HOST")
+        assert hasattr(config, "DB_PORT")
+        assert hasattr(config, "DB_USER")
+        assert hasattr(config, "DB_PASSWORD")
+        assert hasattr(config, "DB_NAME")
+
+    def test_dotenv_loader_parses_custom_file(self, tmp_path):
+        custom_env = tmp_path / "custom.env"
+        custom_env.write_text(
+            "TEST_BANK_KEY=secret_value\n# Comment line\nDB_TEST_PORT=9999\n",
+            encoding="utf-8",
+        )
+        config.load_dotenv(str(custom_env))
+        assert os.environ.get("TEST_BANK_KEY") == "secret_value"
+        assert os.environ.get("DB_TEST_PORT") == "9999"
+
 
 # ===========================================================================
 # 2. Tamper-Evident Audit Logging (ISO 27001 A.12.4.1 & A.12.4.3)
 # ===========================================================================
+
 
 class TestTamperEvidentAuditLog:
     """Control: Cryptographic hash chaining ensures audit logs are tamper-evident."""
@@ -101,12 +122,16 @@ class TestTamperEvidentAuditLog:
 
         # Attacker modifies the second entry directly in SQLite
         conn = db.get_connection()
-        conn.execute("UPDATE Audit_Log SET action = 'Falsified record' WHERE log_id = 2")
+        conn.execute(
+            "UPDATE Audit_Log SET action = 'Falsified record' WHERE log_id = 2"
+        )
         conn.close()
 
         is_valid, corrupted_id = db.verify_audit_log_integrity()
         assert is_valid is False
-        assert corrupted_id == 2, "Integrity check must pinpoint the exact corrupted record ID"
+        assert (
+            corrupted_id == 2
+        ), "Integrity check must pinpoint the exact corrupted record ID"
 
     def test_tamper_detection_on_broken_hash_link(self, test_db):
         """If an attacker deletes or alters a hash link, integrity check detects the rupture."""
@@ -116,17 +141,35 @@ class TestTamperEvidentAuditLog:
 
         # Attacker falsifies the previous_hash link
         conn = db.get_connection()
-        conn.execute("UPDATE Audit_Log SET previous_hash = 'badhash123' WHERE log_id = 3")
+        conn.execute(
+            "UPDATE Audit_Log SET previous_hash = 'badhash123' WHERE log_id = 3"
+        )
         conn.close()
 
         is_valid, corrupted_id = db.verify_audit_log_integrity()
         assert is_valid is False
         assert corrupted_id == 3
 
+    def test_blank_hash_gap_is_tampering(self, test_db):
+        """Rows without hashes are gaps, not valid legacy entries."""
+        db.log_action(1, "Complete entry")
+        conn = db.get_connection()
+        conn.execute(
+            "INSERT INTO Audit_Log (user_id, action, previous_hash, entry_hash) "
+            "VALUES (?, ?, NULL, NULL)",
+            (1, "Unchained entry"),
+        )
+        conn.close()
+
+        is_valid, corrupted_id = db.verify_audit_log_integrity()
+        assert is_valid is False
+        assert corrupted_id == 2
+
 
 # ===========================================================================
 # 3. Maker-Checker Dual Control & Segregation of Duties (ISO 27001 A.6.1.2)
 # ===========================================================================
+
 
 class TestMakerCheckerWorkflow:
     """Control: High-value transactions require Maker-Checker authorization with SoD."""
@@ -138,7 +181,9 @@ class TestMakerCheckerWorkflow:
         acc_rahul_before = db.get_account_by_id(2)["balance"]
         acc_ayush_before = db.get_account_by_id(1)["balance"]
 
-        txn_id = db.create_pending_transfer(from_account_id=2, to_account_id=1, amount=10000.00)
+        txn_id = db.create_pending_transfer(
+            from_account_id=2, to_account_id=1, amount=10000.00
+        )
         assert txn_id > 0
 
         acc_rahul_after = db.get_account_by_id(2)["balance"]
@@ -147,16 +192,20 @@ class TestMakerCheckerWorkflow:
         assert acc_rahul_after == acc_rahul_before
         assert acc_ayush_after == acc_ayush_before
 
-        pending = db.get_pending_transfers()
+        pending = db.get_pending_transfers(admin_user_id=1)
         assert any(t["txn_id"] == txn_id for t in pending)
 
     def test_segregation_of_duties_prevents_maker_self_approval(self, test_db):
         """Segregation of Duties (SoD): The maker cannot approve their own transaction."""
         # Rahul (user_id 2, account_id 2) initiates transfer
-        txn_id = db.create_pending_transfer(from_account_id=2, to_account_id=1, amount=5000.00)
+        txn_id = db.create_pending_transfer(
+            from_account_id=2, to_account_id=1, amount=5000.00
+        )
 
         # Rahul tries to approve his own transfer
-        success, message = db.approve_pending_transfer(txn_id=txn_id, approver_user_id=2)
+        success, message = db.approve_pending_transfer(
+            txn_id=txn_id, approver_user_id=2
+        )
         assert success is False
         assert "Segregation of Duties" in message
 
@@ -166,10 +215,14 @@ class TestMakerCheckerWorkflow:
     def test_checker_approval_executes_transfer_atomically(self, test_db):
         """An authorized independent checker can approve, executing the atomic debit & credit."""
         # Rahul (account_id 2, balance 25000) -> Priya (account_id 3, balance 15000)
-        txn_id = db.create_pending_transfer(from_account_id=2, to_account_id=3, amount=8000.00)
+        txn_id = db.create_pending_transfer(
+            from_account_id=2, to_account_id=3, amount=8000.00
+        )
 
         # Ayush (admin, user_id 1) approves
-        success, message = db.approve_pending_transfer(txn_id=txn_id, approver_user_id=1)
+        success, message = db.approve_pending_transfer(
+            txn_id=txn_id, approver_user_id=1
+        )
         assert success is True
         assert "approved" in message.lower()
 
@@ -178,15 +231,21 @@ class TestMakerCheckerWorkflow:
 
         # Check transaction status updated to completed
         conn = db.get_connection()
-        txn = conn.execute("SELECT status FROM Transactions WHERE txn_id = ?", (txn_id,)).fetchone()
+        txn = conn.execute(
+            "SELECT status FROM Transactions WHERE txn_id = ?", (txn_id,)
+        ).fetchone()
         conn.close()
         assert txn["status"] == "completed"
 
     def test_checker_rejection_marks_transaction_rejected(self, test_db):
         """A checker can reject a transfer, leaving balances completely untouched."""
-        txn_id = db.create_pending_transfer(from_account_id=2, to_account_id=3, amount=5000.00)
+        txn_id = db.create_pending_transfer(
+            from_account_id=2, to_account_id=3, amount=5000.00
+        )
 
-        success, message = db.reject_pending_transfer(txn_id=txn_id, approver_user_id=1, reason="Suspicious pattern")
+        success, message = db.reject_pending_transfer(
+            txn_id=txn_id, approver_user_id=1, reason="Suspicious pattern"
+        )
         assert success is True
 
         # Balances unchanged
@@ -194,20 +253,26 @@ class TestMakerCheckerWorkflow:
         assert db.get_account_by_id(3)["balance"] == 15000.00
 
         conn = db.get_connection()
-        txn = conn.execute("SELECT status FROM Transactions WHERE txn_id = ?", (txn_id,)).fetchone()
+        txn = conn.execute(
+            "SELECT status FROM Transactions WHERE txn_id = ?", (txn_id,)
+        ).fetchone()
         conn.close()
         assert txn["status"] == "rejected"
 
     def test_insufficient_funds_at_approval_time_rejects(self, test_db):
         """If the maker spends funds before checker approves, approval fails safely."""
         # Rahul has 25000
-        txn_id = db.create_pending_transfer(from_account_id=2, to_account_id=3, amount=20000.00)
+        txn_id = db.create_pending_transfer(
+            from_account_id=2, to_account_id=3, amount=20000.00
+        )
 
         # Rahul withdraws 10000, leaving only 15000 in balance
         assert db.withdraw(2, 10000.00) is True
 
         # Admin tries to approve the 20000 transfer
-        success, message = db.approve_pending_transfer(txn_id=txn_id, approver_user_id=1)
+        success, message = db.approve_pending_transfer(
+            txn_id=txn_id, approver_user_id=1
+        )
         assert success is False
         assert "insufficient" in message.lower()
 
@@ -218,6 +283,7 @@ class TestMakerCheckerWorkflow:
 # ===========================================================================
 # 4. User Account Lockout & Admin Unlock (ISO 27001 A.9.4.2)
 # ===========================================================================
+
 
 class TestAdminAccountUnlock:
     """Control: Corrective control allowing admins to unlock brute-force locked accounts."""
@@ -254,21 +320,51 @@ class TestAdminAccountUnlock:
 # 5. Security Alert Remediation (ISO 27001 A.16.1.4)
 # ===========================================================================
 
+
 class TestSecurityAlertRemediation:
-    """Control: Corrective incident response control to track and resolve alerts."""
+    """Control: Admin-only alert workflow open -> reviewed -> closed."""
 
-    def test_raise_and_resolve_security_alert(self, test_db):
-        """Alert starts as 'open' and changes to 'resolved' on admin remediation."""
-        db.raise_alert(user_id=2, alert_type="Brute Force", description="3 failed attempts", severity="high")
+    def test_alert_workflow_requires_review_before_close(self, test_db):
+        """An alert must be reviewed before an administrator can close it."""
+        db.raise_alert(
+            user_id=2,
+            alert_type="Brute Force",
+            description="3 failed attempts",
+            severity="high",
+        )
 
-        open_alerts = db.get_open_alerts()
+        open_alerts = db.get_open_alerts(admin_user_id=1)
         assert len(open_alerts) >= 1
         target_alert = open_alerts[0]
         assert target_alert["status"] == "open"
 
-        # Resolve alert
-        assert db.resolve_alert(alert_id=target_alert["alert_id"], admin_user_id=1) is True
+        alert_id = target_alert["alert_id"]
+        assert db.close_alert(alert_id=alert_id, admin_user_id=1) is False
+        assert (
+            db.review_alert(
+                alert_id=alert_id, admin_user_id=1, note="Reviewed by admin"
+            )
+            is True
+        )
+
+        reviewed = next(
+            a for a in db.get_all_alerts(admin_user_id=1) if a["alert_id"] == alert_id
+        )
+        assert reviewed["status"] == "reviewed"
+        assert reviewed["reviewed_by"] == 1
+
+        assert (
+            db.close_alert(alert_id=alert_id, admin_user_id=1, note="No further action")
+            is True
+        )
 
         # Verify no longer in open alerts
-        remaining_open = db.get_open_alerts()
-        assert not any(a["alert_id"] == target_alert["alert_id"] for a in remaining_open)
+        remaining_open = db.get_open_alerts(admin_user_id=1)
+        assert not any(a["alert_id"] == alert_id for a in remaining_open)
+
+    def test_non_admin_cannot_read_security_alerts(self, test_db):
+        db.raise_alert(
+            user_id=2, alert_type="Test", description="sensitive", severity="medium"
+        )
+        assert db.get_all_alerts(admin_user_id=2) == []
+        assert db.get_open_alerts(admin_user_id=2) == []

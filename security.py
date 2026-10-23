@@ -25,10 +25,10 @@ from config import (
     MIN_PASSWORD_LENGTH,
 )
 
-
 # ---------------------------------------------------------------------------
 # SEC-01  Amount validation
 # ---------------------------------------------------------------------------
+
 
 def validate_amount(amount: float) -> tuple:
     """
@@ -63,6 +63,7 @@ def validate_amount(amount: float) -> tuple:
 # SEC-02 / SEC-03  Safe input wrappers
 # ---------------------------------------------------------------------------
 
+
 def safe_float_input(prompt: str) -> Optional[float]:
     """
     Display prompt, read a line, and return a float.
@@ -75,7 +76,9 @@ def safe_float_input(prompt: str) -> Optional[float]:
     try:
         return float(raw)
     except ValueError:
-        print(f"  [!] Invalid input: '{raw}' is not a number. Please enter a numeric value.")
+        print(
+            f"  [!] Invalid input: '{raw}' is not a number. Please enter a numeric value."
+        )
         return None
 
 
@@ -88,13 +91,16 @@ def safe_int_input(prompt: str) -> Optional[int]:
     try:
         return int(raw)
     except ValueError:
-        print(f"  [!] Invalid input: '{raw}' is not a whole number. Please enter an integer.")
+        print(
+            f"  [!] Invalid input: '{raw}' is not a whole number. Please enter an integer."
+        )
         return None
 
 
 # ---------------------------------------------------------------------------
 # SEC-04  Password policy
 # ---------------------------------------------------------------------------
+
 
 def password_meets_policy(password: str) -> tuple:
     """
@@ -136,6 +142,7 @@ def password_meets_policy(password: str) -> tuple:
 # SEC-05  Session inactivity timeout
 # ---------------------------------------------------------------------------
 
+
 class Session:
     """
     Tracks the time of the last user interaction.
@@ -168,3 +175,85 @@ class Session:
         """How many seconds remain before the session expires."""
         elapsed = time.monotonic() - self._last_activity
         return max(0.0, self.timeout - elapsed)
+
+
+# ---------------------------------------------------------------------------
+# SEC-07  Intrusion Detection Rules
+# ---------------------------------------------------------------------------
+
+# SQL injection payload patterns (OWASP Top 10 A03:2021 -- Injection)
+_SQLI_PATTERNS = re.compile(
+    r"('|\b(OR|AND)\b.*=.*|--|;|/\*|\*/|xp_|UNION\s+SELECT|"
+    r"DROP\s+TABLE|INSERT\s+INTO|SELECT\s+\*|1\s*=\s*1|"
+    r"SLEEP\s*\(|WAITFOR\s+DELAY|EXEC\s*\(|CAST\s*\()",
+    re.IGNORECASE,
+)
+
+# Velocity: maximum transactions within a rolling window (intrusion signal)
+VELOCITY_WINDOW_SECONDS: int = 60  # rolling window
+VELOCITY_MAX_TRANSACTIONS: int = 10  # alert if exceeded in window
+
+
+def detect_sqli(user_input: str) -> bool:
+    """
+    Return True if the string matches common SQL injection patterns.
+
+    This is an INPUT VALIDATION defence-in-depth layer.  Parameterised queries
+    in db.py are the primary protection; this detector provides an early-warning
+    signal for the Alerts table (ISO 27001:2022 A.8.16 -- Monitoring Activities).
+
+    Patterns checked:
+      - Classic OR/AND tautologies:  ' OR 1=1 --
+      - UNION-based extraction:      UNION SELECT ...
+      - Comment sequences:           --, /* */
+      - Time-based blind:            SLEEP(), WAITFOR DELAY
+      - Stacked queries:             ; DROP TABLE
+      - Stored procedure calls:      xp_cmdshell, EXEC()
+    """
+    return bool(_SQLI_PATTERNS.search(user_input))
+
+
+def check_velocity(
+    transaction_times: list,
+    window_seconds: int = VELOCITY_WINDOW_SECONDS,
+    max_allowed: int = VELOCITY_MAX_TRANSACTIONS,
+) -> tuple:
+    """
+    Detect abnormally high transaction velocity (ISO 27001:2022 A.8.16).
+
+    Args:
+        transaction_times: List of float timestamps (time.monotonic()) for
+                           recent transactions by one user / account.
+        window_seconds:    Rolling window to count within (default: 60 s).
+        max_allowed:       Maximum transactions permitted in window (default: 10).
+
+    Returns:
+        (True, count)   if velocity exceeds threshold -- caller should raise alert.
+        (False, count)  if within normal bounds.
+
+    Why this matters:
+        Card-skimmer or automated fraud scripts submit dozens of transactions
+        per minute.  A velocity rule is a lightweight, first-line detector that
+        can freeze an account before significant loss occurs.
+    """
+    now = time.monotonic()
+    cutoff = now - window_seconds
+    recent = [t for t in transaction_times if t >= cutoff]
+    count = len(recent)
+    if count > max_allowed:
+        return True, count
+    return False, count
+
+
+def is_odd_hour(timestamp=None) -> bool:
+    """Return True for transactions submitted during the configured quiet hours.
+
+    The default rule treats 23:00 through 05:59 UTC as an unusual hour. The
+    caller can pass a timezone-aware ``datetime`` in tests or deployments that
+    use a local business timezone.
+    """
+    from datetime import datetime, timezone
+
+    moment = timestamp or datetime.now(timezone.utc)
+    hour = moment.hour
+    return hour >= 23 or hour < 6

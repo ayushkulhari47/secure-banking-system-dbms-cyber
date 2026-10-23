@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS Users (
 -- Accounts table: one account per user; balance cannot go negative (DB constraint).
 CREATE TABLE IF NOT EXISTS Accounts (
     account_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    INTEGER NOT NULL REFERENCES Users(user_id),
+    user_id    INTEGER NOT NULL UNIQUE REFERENCES Users(user_id),
     balance    REAL    NOT NULL DEFAULT 0.00
                        CHECK(balance >= 0),     -- prevents overdraft at DB level
     created_at TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -76,6 +76,11 @@ CREATE TABLE IF NOT EXISTS Alerts (
     severity    TEXT    NOT NULL DEFAULT 'medium'
                         CHECK(severity IN ('low','medium','high')),
     status      TEXT    NOT NULL DEFAULT 'open'
-                        CHECK(status IN ('open','resolved')),
-    alert_time  TEXT    NOT NULL DEFAULT (datetime('now'))
+                       CHECK(status IN ('open','reviewed','closed')),
+    alert_time  TEXT    NOT NULL DEFAULT (datetime('now')),
+    reviewed_by INTEGER REFERENCES Users(user_id),
+    reviewed_at TEXT,
+    closed_by   INTEGER REFERENCES Users(user_id),
+    closed_at   TEXT,
+    resolution_note TEXT
 );

@@ -31,8 +31,8 @@ System showed "Wrong password! Attempt 1/3"
 On 3rd attempt account gets locked and alert is raised
 Screenshot: test4.png
 
-Test 5 - GitHub Repository
-Result: Complete project structure visible on GitHub
+Test 5 - GitHub Repository (historical evidence)
+Result: Repository structure was visible in the earlier screenshot; this does not prove the current unpushed branch.
 docs folder, sql folder, app.py and README all present
 12 commits showing project development history
 Screenshot: test5.png

@@ -12,10 +12,7 @@ Run: pytest tests/test_security_fixes.py -v
 
 import math
 import time
-import sqlite3
 import hashlib
-import pytest
-import bcrypt
 
 import security
 from security import (
@@ -27,10 +24,10 @@ from security import (
 )
 import db as db_module
 
-
 # ===========================================================================
 # SEC-01  Amount validation  (negative transfer exploit + edge cases)
 # ===========================================================================
+
 
 class TestAmountValidation:
     """
@@ -106,6 +103,7 @@ class TestAmountValidation:
 # SEC-02 / SEC-03  Safe input wrappers
 # ===========================================================================
 
+
 class TestSafeInputWrappers:
     """
     Vulnerability fixed: bare float(input(...)) crashes on non-numeric input.
@@ -162,6 +160,7 @@ class TestSafeInputWrappers:
 # SEC-04  Password policy
 # ===========================================================================
 
+
 class TestPasswordPolicy:
     """
     Control: minimum complexity enforced at account creation.
@@ -215,6 +214,7 @@ class TestPasswordPolicy:
 # SEC-05  Session timeout
 # ===========================================================================
 
+
 class TestSessionTimeout:
     """
     Control: session auto-expires after inactivity.
@@ -236,8 +236,8 @@ class TestSessionTimeout:
         """Calling refresh() after near-expiry extends the session."""
         session = Session(timeout_seconds=1)
         time.sleep(0.8)
-        session.refresh()      # reset clock
-        time.sleep(0.5)        # total idle since refresh: 0.5 s < 1 s timeout
+        session.refresh()  # reset clock
+        time.sleep(0.5)  # total idle since refresh: 0.5 s < 1 s timeout
         assert session.is_expired() is False
 
     def test_seconds_remaining_decreases_over_time(self):
@@ -259,6 +259,7 @@ class TestSessionTimeout:
 # SEC-06  Self-transfer block  (via DB layer)
 # ===========================================================================
 
+
 class TestSelfTransferBlock:
     """
     Vulnerability fixed: users could transfer money to their own account.
@@ -275,20 +276,21 @@ class TestSelfTransferBlock:
         destination_id = 1  # same as own
 
         # This is the exact check in app.py do_transfer():
-        is_self_transfer = (destination_id == own_account_id)
+        is_self_transfer = destination_id == own_account_id
         assert is_self_transfer is True
 
     def test_different_account_not_self_transfer(self):
         """Different source and destination account IDs pass the self-transfer check."""
         own_account_id = 1
         destination_id = 2
-        is_self_transfer = (destination_id == own_account_id)
+        is_self_transfer = destination_id == own_account_id
         assert is_self_transfer is False
 
 
 # ===========================================================================
 # Bcrypt hashing  (replaces SHA-256)
 # ===========================================================================
+
 
 class TestBcryptHashing:
     """
@@ -303,9 +305,9 @@ class TestBcryptHashing:
     def test_hash_is_bcrypt_format(self):
         """hash_password() returns a bcrypt hash string (starts with $2b$)."""
         hashed = db_module.hash_password("TestPass@99")
-        assert hashed.startswith("$2b$"), (
-            f"Expected bcrypt format ($2b$...), got: {hashed[:10]}..."
-        )
+        assert hashed.startswith(
+            "$2b$"
+        ), f"Expected bcrypt format ($2b$...), got: {hashed[:10]}..."
 
     def test_same_password_different_hashes(self):
         """
@@ -354,6 +356,7 @@ class TestBcryptHashing:
 # RBAC enforcement
 # ===========================================================================
 
+
 class TestRBAC:
     """
     Vulnerability fixed: any user could view the full audit log and all alerts.
@@ -363,7 +366,7 @@ class TestRBAC:
 
     def test_admin_role_string(self):
         """The string 'admin' is the correct role value for admins."""
-        assert "admin" == "admin"   # guard: role comparison is exact string match
+        assert "admin" == "admin"  # guard: role comparison is exact string match
 
     def test_user_role_cannot_access_admin_resources(self):
         """
@@ -372,19 +375,19 @@ class TestRBAC:
         """
         role = "user"
         # This is the exact check in view_audit_log() and view_alerts():
-        access_granted = (role == "admin")
+        access_granted = role == "admin"
         assert access_granted is False
 
     def test_admin_role_can_access_admin_resources(self):
         """Admin role passes the RBAC check."""
         role = "admin"
-        access_granted = (role == "admin")
+        access_granted = role == "admin"
         assert access_granted is True
 
     def test_empty_role_denied(self):
         """An empty string role (corrupt data) is denied."""
         role = ""
-        access_granted = (role == "admin")
+        access_granted = role == "admin"
         assert access_granted is False
 
     def test_case_sensitive_role_check(self):
