@@ -472,6 +472,68 @@ def get_failed_attempts(user_id: int) -> int:
         conn.close()
 
 
+def change_password(user_id: int, old_password: str, new_password: str) -> tuple:
+    """
+    Change a user's password with full security validation.
+
+    Security controls (ISO 27001:2022 A.5.17 -- Authentication Information):
+      1. Verifies old_password against stored bcrypt hash (timing-safe).
+      2. Enforces new_password complexity via password_meets_policy().
+      3. Rejects new password if identical to old password.
+      4. Atomically updates password_hash in a single transaction.
+      5. Writes a tamper-evident audit log entry on success.
+
+    Returns (True, None) on success, (False, reason_string) on failure.
+    Never logs the plaintext of either password.
+    """
+    from security import password_meets_policy  # local import avoids circular
+
+    conn = get_connection()
+    try:
+        # 1. Fetch current hash
+        user = conn.execute(
+            "SELECT password_hash FROM Users WHERE user_id = ?", (user_id,)
+        ).fetchone()
+        if not user:
+            return False, "User not found."
+
+        # 2. Verify current password
+        if not verify_password(old_password, user["password_hash"]):
+            log_action(user_id, "Failed password change -- incorrect current password")
+            return False, "Current password is incorrect."
+
+        # 3. Enforce complexity policy on new password
+        ok, violations = password_meets_policy(new_password)
+        if not ok:
+            return False, "New password does not meet policy: " + "; ".join(violations)
+
+        # 4. Reject if new password is same as old
+        if verify_password(new_password, user["password_hash"]):
+            return False, "New password must be different from the current password."
+
+        # 5. Atomically update hash
+        new_hash = hash_password(new_password)
+        conn.execute("BEGIN")
+        try:
+            conn.execute(
+                "UPDATE Users SET password_hash = ? WHERE user_id = ?",
+                (new_hash, user_id),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+        # 6. Audit log (no plaintext)
+        log_action(user_id, "Password changed successfully")
+        return True, None
+
+    finally:
+        conn.close()
+
+
+
+
 # ---------------------------------------------------------------------------
 # Audit log (Cryptographic Hash Chaining -- Tamper-Evident)
 # ---------------------------------------------------------------------------

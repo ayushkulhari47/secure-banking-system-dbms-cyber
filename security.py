@@ -168,3 +168,72 @@ class Session:
         """How many seconds remain before the session expires."""
         elapsed = time.monotonic() - self._last_activity
         return max(0.0, self.timeout - elapsed)
+
+
+# ---------------------------------------------------------------------------
+# SEC-07  Intrusion Detection Rules
+# ---------------------------------------------------------------------------
+
+# SQL injection payload patterns (OWASP Top 10 A03:2021 -- Injection)
+_SQLI_PATTERNS = re.compile(
+    r"('|\b(OR|AND)\b.*=.*|--|;|/\*|\*/|xp_|UNION\s+SELECT|"
+    r"DROP\s+TABLE|INSERT\s+INTO|SELECT\s+\*|1\s*=\s*1|"
+    r"SLEEP\s*\(|WAITFOR\s+DELAY|EXEC\s*\(|CAST\s*\()",
+    re.IGNORECASE,
+)
+
+# Velocity: maximum transactions within a rolling window (intrusion signal)
+VELOCITY_WINDOW_SECONDS: int = 60   # rolling window
+VELOCITY_MAX_TRANSACTIONS: int = 10  # alert if exceeded in window
+
+
+def detect_sqli(user_input: str) -> bool:
+    """
+    Return True if the string matches common SQL injection patterns.
+
+    This is an INPUT VALIDATION defence-in-depth layer.  Parameterised queries
+    in db.py are the primary protection; this detector provides an early-warning
+    signal for the Alerts table (ISO 27001:2022 A.8.16 -- Monitoring Activities).
+
+    Patterns checked:
+      - Classic OR/AND tautologies:  ' OR 1=1 --
+      - UNION-based extraction:      UNION SELECT ...
+      - Comment sequences:           --, /* */
+      - Time-based blind:            SLEEP(), WAITFOR DELAY
+      - Stacked queries:             ; DROP TABLE
+      - Stored procedure calls:      xp_cmdshell, EXEC()
+    """
+    return bool(_SQLI_PATTERNS.search(user_input))
+
+
+def check_velocity(
+    transaction_times: list,
+    window_seconds: int = VELOCITY_WINDOW_SECONDS,
+    max_allowed: int = VELOCITY_MAX_TRANSACTIONS,
+) -> tuple:
+    """
+    Detect abnormally high transaction velocity (ISO 27001:2022 A.8.16).
+
+    Args:
+        transaction_times: List of float timestamps (time.monotonic()) for
+                           recent transactions by one user / account.
+        window_seconds:    Rolling window to count within (default: 60 s).
+        max_allowed:       Maximum transactions permitted in window (default: 10).
+
+    Returns:
+        (True, count)   if velocity exceeds threshold -- caller should raise alert.
+        (False, count)  if within normal bounds.
+
+    Why this matters:
+        Card-skimmer or automated fraud scripts submit dozens of transactions
+        per minute.  A velocity rule is a lightweight, first-line detector that
+        can freeze an account before significant loss occurs.
+    """
+    now = time.monotonic()
+    cutoff = now - window_seconds
+    recent = [t for t in transaction_times if t >= cutoff]
+    count = len(recent)
+    if count > max_allowed:
+        return True, count
+    return False, count
+

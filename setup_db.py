@@ -11,7 +11,12 @@ What this script does (idempotent -- safe to run multiple times):
        deposit, withdraw, transfer
   5. Creates / replaces the three triggers from sql/triggers.sql:
        after_failed_login, after_transaction, after_user_login
-  6. Runs diagnostic SELECTs to confirm the database is properly populated.
+  6. Creates a least-privilege MySQL user 'bank_app'@'localhost' and grants
+     only SELECT, INSERT, UPDATE on secure_banking.* (principle of least
+     privilege -- ISO 27001:2022 A.8.18 / A.5.15).  The bank_app password
+     must be set in .env as DB_APP_PASSWORD.  Root is used ONLY for this
+     provisioning step; the running application uses bank_app.
+  7. Runs diagnostic SELECTs to confirm the database is properly populated.
 
 Usage:
     python setup_db.py
@@ -41,6 +46,12 @@ def _raw_conn():
         autocommit=True,
         charset="utf8mb4",
     )
+
+
+import os
+
+DB_APP_USER = "bank_app"
+DB_APP_HOST = "localhost"
 
 
 # ---------------------------------------------------------------------------
@@ -296,6 +307,79 @@ def verify():
 
 
 # ---------------------------------------------------------------------------
+# Step 6 -- Least-privilege app user: bank_app
+# ---------------------------------------------------------------------------
+
+def create_app_user():
+    """
+    Create 'bank_app'@'localhost' with the minimum privileges the application
+    needs at runtime (ISO 27001:2022 A.8.18 Privileged Access Rights / A.5.15
+    Principle of Least Privilege).
+
+    Grants: SELECT, INSERT, UPDATE on secure_banking.* only.
+    No DROP, ALTER, GRANT, DELETE, or administrative privileges.
+
+    The bank_app password is read from DB_APP_PASSWORD in .env.
+    Root credentials are used ONLY during this provisioning step.
+    """
+    app_password = os.environ.get("DB_APP_PASSWORD", "")
+    if not app_password:
+        print(
+            "\n[6/7] Skipping bank_app user creation: DB_APP_PASSWORD not set in .env.\n"
+            "      Set DB_APP_PASSWORD=<strong_password> in your .env and re-run to\n"
+            "      create the least-privilege application user."
+        )
+        return
+
+    print(f"\n[6/7] Creating least-privilege MySQL user '{DB_APP_USER}'@'{DB_APP_HOST}' ...")
+    admin = pymysql.connect(
+        host=config.DB_HOST,
+        port=config.DB_PORT,
+        user=config.DB_USER,
+        password=config.DB_PASSWORD,
+        autocommit=True,
+        charset="utf8mb4",
+    )
+    try:
+        with admin.cursor() as cur:
+            # Create user if not exists (idempotent)
+            cur.execute(
+                f"CREATE USER IF NOT EXISTS '{DB_APP_USER}'@'{DB_APP_HOST}' "
+                f"IDENTIFIED BY %s",
+                (app_password,),
+            )
+            # Update password in case it changed
+            cur.execute(
+                f"ALTER USER '{DB_APP_USER}'@'{DB_APP_HOST}' IDENTIFIED BY %s",
+                (app_password,),
+            )
+            # Grant exactly what the app needs -- no more
+            cur.execute(
+                f"GRANT SELECT, INSERT, UPDATE ON `{config.DB_NAME}`.* "
+                f"TO '{DB_APP_USER}'@'{DB_APP_HOST}'"
+            )
+            cur.execute("FLUSH PRIVILEGES")
+
+            # Verify
+            cur.execute(
+                f"SHOW GRANTS FOR '{DB_APP_USER}'@'{DB_APP_HOST}'"
+            )
+            grants = [r[0] for r in cur.fetchall()]
+        print(f"    OK  User '{DB_APP_USER}'@'{DB_APP_HOST}' created/updated.")
+        for g in grants:
+            print(f"       {g}")
+        print(
+            f"\n    ACTION REQUIRED: Update your .env to switch the app to bank_app:\n"
+            f"      DB_USER={DB_APP_USER}\n"
+            f"      DB_PASSWORD=<same value as DB_APP_PASSWORD>\n"
+            f"    Keep root credentials only in DB_ADMIN_USER / DB_ADMIN_PASSWORD\n"
+            f"    (or remove them from .env entirely after provisioning)."
+        )
+    finally:
+        admin.close()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -318,6 +402,7 @@ if __name__ == "__main__":
         migrate_audit_log()
         create_stored_procedures()
         create_triggers()
+        create_app_user()
         verify()
         print("\n" + "=" * 60)
         print("  Setup complete! MySQL database is ready.")

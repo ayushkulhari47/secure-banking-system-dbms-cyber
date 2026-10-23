@@ -309,6 +309,39 @@ def view_alerts(user_id: int, role: str, session: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Change Password (Phase 3 -- ISO 27001:2022 A.5.17)
+# ---------------------------------------------------------------------------
+
+def do_change_password(user_id: int, session: Session) -> None:
+    """
+    Allow any authenticated user to change their own password.
+
+    Security controls:
+      - Old password verified (timing-safe bcrypt.checkpw)
+      - New password must pass complexity policy
+      - New password must differ from old
+      - All of the above enforced inside db.change_password()
+      - Audit log entry written on success (no plaintext stored)
+    """
+    print("\n--- Change Password ---")
+    import getpass
+    old_pw = getpass.getpass("Current password: ")
+    new_pw = getpass.getpass("New password: ")
+    new_pw2 = getpass.getpass("Confirm new password: ")
+
+    if new_pw != new_pw2:
+        print("  [!] New passwords do not match. Password not changed.")
+        return
+
+    ok, reason = db.change_password(user_id, old_pw, new_pw)
+    if ok:
+        print("  [+] Password changed successfully.")
+        session.refresh()
+    else:
+        print(f"  [!] Password change failed: {reason}")
+
+
+# ---------------------------------------------------------------------------
 # Phase 3 Admin Control Consoles (Maker-Checker, Unlock, Alert Resolution, Integrity)
 # ---------------------------------------------------------------------------
 
@@ -487,17 +520,18 @@ def menu(user_id: int, role: str) -> None:
         print("3. Withdraw")
         print("4. Transfer")
         print("5. Transaction History")
+        print("6. Change Password")
         if role == "admin":
-            print("6. Audit Log (View)")
-            print("7. Security Alerts & Remediation")
-            print("8. Maker-Checker Approvals")
-            print("9. Unlock User Accounts")
-            print("10. Verify Audit Log Integrity")
-            print("11. Logout")
+            print("7.  Audit Log (View)")
+            print("8.  Security Alerts & Remediation")
+            print("9.  Maker-Checker Approvals")
+            print("10. Unlock User Accounts")
+            print("11. Verify Audit Log Integrity")
+            print("12. Logout")
         else:
-            print("6. Audit Log        (admin only)")
-            print("7. Security Alerts  (admin only)")
-            print("8. Logout")
+            print("7. Audit Log        (admin only)")
+            print("8. Security Alerts  (admin only)")
+            print("9. Logout")
 
         choice = input("Choose: ").strip()
 
@@ -512,24 +546,26 @@ def menu(user_id: int, role: str) -> None:
         elif choice == "5":
             view_transactions(user_id, role, session)
         elif choice == "6":
-            view_audit_log(user_id, role, session)
+            do_change_password(user_id, session)
         elif choice == "7":
+            view_audit_log(user_id, role, session)
+        elif choice == "8":
             if role == "admin":
                 manage_alerts(user_id, role, session)
             else:
                 view_alerts(user_id, role, session)
-        elif choice == "8":
+        elif choice == "9":
             if role == "admin":
                 manage_pending_transfers(user_id, role, session)
             else:
                 db.log_action(user_id, "Logged out")
                 print("Goodbye!")
                 break
-        elif choice == "9" and role == "admin":
-            manage_locked_users(user_id, role, session)
         elif choice == "10" and role == "admin":
-            verify_audit_integrity_menu(user_id, role, session)
+            manage_locked_users(user_id, role, session)
         elif choice == "11" and role == "admin":
+            verify_audit_integrity_menu(user_id, role, session)
+        elif choice == "12" and role == "admin":
             db.log_action(user_id, "Logged out")
             print("Goodbye!")
             break
