@@ -319,8 +319,8 @@ def create_app_user():
                 (app_password,),
             )
             cur.execute(
-                f"REVOKE ALL PRIVILEGES, GRANT OPTION ON `{config.DB_NAME}`.* "
-                f"FROM '{DB_APP_USER}'@'{DB_APP_HOST}'"
+              f"REVOKE ALL PRIVILEGES, GRANT OPTION "
+f"FROM '{DB_APP_USER}'@'{DB_APP_HOST}'"
             )
             for table, privileges in config.APP_TABLE_GRANTS.items():
                 cur.execute(
