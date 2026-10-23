@@ -57,6 +57,24 @@ class TestCentralizedConfiguration:
         assert config.MAX_AMOUNT == 1_000_000.00
         assert config.BCRYPT_ROUNDS == 12
 
+    def test_database_configuration_constants_exist(self):
+        assert hasattr(config, "DB_TYPE")
+        assert hasattr(config, "DB_PATH")
+        assert hasattr(config, "DB_HOST")
+        assert hasattr(config, "DB_PORT")
+        assert hasattr(config, "DB_USER")
+        assert hasattr(config, "DB_PASSWORD")
+        assert hasattr(config, "DB_NAME")
+
+    def test_dotenv_loader_parses_custom_file(self, tmp_path):
+        custom_env = tmp_path / "custom.env"
+        custom_env.write_text("TEST_BANK_KEY=secret_value\n# Comment line\nDB_TEST_PORT=9999\n", encoding="utf-8")
+        config.load_dotenv(str(custom_env))
+        assert os.environ.get("TEST_BANK_KEY") == "secret_value"
+        assert os.environ.get("DB_TEST_PORT") == "9999"
+
+
+
 
 # ===========================================================================
 # 2. Tamper-Evident Audit Logging (ISO 27001 A.12.4.1 & A.12.4.3)

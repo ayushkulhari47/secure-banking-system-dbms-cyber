@@ -19,30 +19,176 @@ import hashlib
 from datetime import datetime, timezone
 import bcrypt
 
+try:
+    import pymysql
+    import pymysql.cursors
+    HAS_PYMYSQL = True
+except ImportError:
+    HAS_PYMYSQL = False
+
 from config import (
     BCRYPT_ROUNDS,
     MAX_FAILED_LOGINS,
     LARGE_TXN_THRESHOLD,
+    DB_TYPE,
+    DB_PATH as CFG_DB_PATH,
+    DB_HOST,
+    DB_PORT,
+    DB_USER,
+    DB_PASSWORD,
+    DB_NAME,
 )
 
 # ---------------------------------------------------------------------------
-# Connection
+# Connection & Database Engine Abstraction
 # ---------------------------------------------------------------------------
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "banking.db")
+DB_PATH = CFG_DB_PATH if os.path.isabs(CFG_DB_PATH) else os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), CFG_DB_PATH
+)
 
 
-def get_connection() -> sqlite3.Connection:
+class MySQLCursorWrapper:
+    """Wraps a PyMySQL cursor to provide an interface matching sqlite3."""
+
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    @property
+    def lastrowid(self):
+        return self._cursor.lastrowid
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+
+class MySQLConnectionWrapper:
     """
-    Open (or create) the SQLite database and return a connection.
-    Row factory enables dict-like access: row["column_name"].
-    isolation_level=None means we manage BEGIN/COMMIT/ROLLBACK ourselves.
+    Wraps a PyMySQL connection so all SQL execution in db.py works identically
+    across SQLite and MySQL:
+      - Automatically maps '?' placeholders to '%s'
+      - Intercepts BEGIN, COMMIT, and ROLLBACK to control transactions
+      - Ignores SQLite-specific PRAGMAs
+      - Provides dict-like row access via PyMySQL DictCursor
     """
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
+
+    def __init__(self, raw_conn):
+        self._conn = raw_conn
+
+    def execute(self, sql: str, params=()):
+        sql_clean = sql.strip()
+        upper_sql = sql_clean.upper()
+
+        if upper_sql == "BEGIN":
+            self._conn.begin()
+            return None
+        if upper_sql == "COMMIT":
+            self._conn.commit()
+            return None
+        if upper_sql == "ROLLBACK":
+            self._conn.rollback()
+            return None
+        if upper_sql.startswith("PRAGMA"):
+            return None
+
+        converted_sql = sql.replace("?", "%s")
+        cursor = self._conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute(converted_sql, params)
+        return MySQLCursorWrapper(cursor)
+
+    def executescript(self, script: str):
+        statements = script.split(";")
+        for stmt in statements:
+            stmt = stmt.strip()
+            if stmt:
+                self.execute(stmt)
+
+    def close(self):
+        self._conn.close()
+
+
+def _get_sqlite_connection(path: str = None) -> sqlite3.Connection:
+    target_path = path or DB_PATH
+    conn = sqlite3.connect(target_path, check_same_thread=False, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    # SQLite disables foreign-key enforcement by default -- turn it on.
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def get_mysql_connection():
+    if not HAS_PYMYSQL:
+        raise RuntimeError("PyMySQL package is not installed. Run: pip install PyMySQL")
+    try:
+        raw_conn = pymysql.connect(
+            host=DB_HOST,
+            port=DB_PORT,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME,
+            autocommit=False,
+            cursorclass=pymysql.cursors.DictCursor,
+        )
+        return MySQLConnectionWrapper(raw_conn)
+    except pymysql.err.OperationalError as e:
+        # Code 1049: Unknown database - automatically create it
+        if len(e.args) > 0 and e.args[0] == 1049:
+            admin_conn = pymysql.connect(
+                host=DB_HOST,
+                port=DB_PORT,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                autocommit=True,
+            )
+            try:
+                with admin_conn.cursor() as cur:
+                    cur.execute(
+                        f"CREATE DATABASE IF NOT EXISTS `{DB_NAME}` "
+                        "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                    )
+            finally:
+                admin_conn.close()
+            # Retry connection with database created
+            raw_conn = pymysql.connect(
+                host=DB_HOST,
+                port=DB_PORT,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                database=DB_NAME,
+                autocommit=False,
+                cursorclass=pymysql.cursors.DictCursor,
+            )
+            return MySQLConnectionWrapper(raw_conn)
+        raise
+
+
+def get_connection():
+    """
+    Open and return a database connection.
+    Supports dual database engines configured via .env:
+      - DB_TYPE='mysql': Connects to MySQL using PyMySQL (with automatic schema provisioning).
+      - DB_TYPE='sqlite': Connects to SQLite (zero extra dependencies).
+    If MySQL connection fails, safely falls back to SQLite so local execution never crashes.
+    """
+    default_db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "banking.db")
+    if DB_PATH != default_db_path and DB_PATH != "banking.db":
+        return _get_sqlite_connection(DB_PATH)
+
+    if DB_TYPE == "mysql":
+        try:
+            return get_mysql_connection()
+        except Exception as e:
+            print(f"  [!] Notice: MySQL connection failed ({e}).")
+            print(f"      Falling back to SQLite database ({DB_PATH}).")
+            return _get_sqlite_connection()
+
+    return _get_sqlite_connection()
+
+
+def is_mysql_connection(conn) -> bool:
+    return isinstance(conn, MySQLConnectionWrapper)
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +251,63 @@ CREATE TABLE IF NOT EXISTS Alerts (
 """
 
 
+MYSQL_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS Users (
+    user_id         INT AUTO_INCREMENT PRIMARY KEY,
+    name            VARCHAR(100) NOT NULL,
+    email           VARCHAR(100) UNIQUE NOT NULL,
+    password_hash   VARCHAR(255) NOT NULL,
+    role            ENUM('admin','user') NOT NULL DEFAULT 'user',
+    failed_attempts INT NOT NULL DEFAULT 0,
+    is_locked       TINYINT(1) NOT NULL DEFAULT 0,
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS Accounts (
+    account_id INT AUTO_INCREMENT PRIMARY KEY,
+    user_id    INT NOT NULL,
+    balance    DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
+    CHECK (balance >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS Transactions (
+    txn_id       INT AUTO_INCREMENT PRIMARY KEY,
+    from_account INT NULL,
+    to_account   INT NULL,
+    amount       DECIMAL(15,2) NOT NULL,
+    txn_type     ENUM('deposit','withdraw','transfer') NOT NULL,
+    status       ENUM('completed','pending','rejected') NOT NULL DEFAULT 'completed',
+    txn_time     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (from_account) REFERENCES Accounts(account_id),
+    FOREIGN KEY (to_account) REFERENCES Accounts(account_id),
+    CHECK (amount > 0)
+);
+
+CREATE TABLE IF NOT EXISTS Audit_Log (
+    log_id        INT AUTO_INCREMENT PRIMARY KEY,
+    user_id       INT NULL,
+    action        VARCHAR(255) NOT NULL,
+    log_time      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    previous_hash VARCHAR(64) NULL,
+    entry_hash    VARCHAR(64) NULL,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id)
+);
+
+CREATE TABLE IF NOT EXISTS Alerts (
+    alert_id    INT AUTO_INCREMENT PRIMARY KEY,
+    user_id     INT NULL,
+    alert_type  VARCHAR(100) NOT NULL,
+    description TEXT NULL,
+    severity    ENUM('low','medium','high') NOT NULL DEFAULT 'medium',
+    status      ENUM('open','resolved') NOT NULL DEFAULT 'open',
+    alert_time  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES Users(user_id)
+);
+"""
+
+
 def init_db() -> None:
     """
     Create tables and seed demo data if the database does not yet exist.
@@ -113,13 +316,16 @@ def init_db() -> None:
     """
     conn = get_connection()
     try:
-        conn.executescript(SCHEMA_SQL)
-        # Automated column migrations for existing databases
-        audit_cols = [r["name"] for r in conn.execute("PRAGMA table_info(Audit_Log)").fetchall()]
-        if "previous_hash" not in audit_cols:
-            conn.execute("ALTER TABLE Audit_Log ADD COLUMN previous_hash TEXT")
-        if "entry_hash" not in audit_cols:
-            conn.execute("ALTER TABLE Audit_Log ADD COLUMN entry_hash TEXT")
+        if is_mysql_connection(conn):
+            conn.executescript(MYSQL_SCHEMA_SQL)
+        else:
+            conn.executescript(SCHEMA_SQL)
+            # Automated column migrations for existing databases
+            audit_cols = [r["name"] for r in conn.execute("PRAGMA table_info(Audit_Log)").fetchall()]
+            if "previous_hash" not in audit_cols:
+                conn.execute("ALTER TABLE Audit_Log ADD COLUMN previous_hash TEXT")
+            if "entry_hash" not in audit_cols:
+                conn.execute("ALTER TABLE Audit_Log ADD COLUMN entry_hash TEXT")
 
         _seed_if_empty(conn)
     finally:

@@ -218,6 +218,7 @@ backups/
 # Environments & sensitive files
 .env
 .env.*
+!.env.example
 venv/
 .venv/
 env/
