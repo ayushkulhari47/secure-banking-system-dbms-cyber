@@ -4,15 +4,17 @@
 **Target System:** Secure Banking System (Core Ledger & Security Subsystems)  
 **Audit Standard:** ISO/IEC 27001:2022 / COBIT 2019 / SOX ITGC Testing  
 **Audit Test Run:** October 2026  
-**Total Automated Tests:** 74  
-**Audit Test Status:** **74 Passed / 0 Failed / 0 Exceptions (100% Effective)**  
+**Total Automated Tests:** 123  
+**Current Test Status:** **123 passed / 0 failed on the hermetic SQLite suite**  
+
+> Scope note: this is an educational control-testing workpaper, not an independent audit or a certification. MySQL provisioning, live least-privilege grants, and operational backup/restore require a configured service and are not proven by the SQLite CI suite.
 
 ---
 
 ## 1. Executive Testing Summary
 During this control testing cycle, the IT Audit team evaluated the design and operating effectiveness of the key automated controls governing the **Secure Banking System**. Testing encompassed application controls, database integrity constraints, cryptographic protection mechanisms, role-based access limits, Maker-Checker segregation of duties, and audit trail resilience.
 
-All 74 control tests were executed through the hermetic automated testing suite (`pytest`), verifying that controls perform in strict accordance with documented security policies.
+The current 123-test suite was executed through the hermetic automated testing suite (`pytest`). The results provide evidence for the SQLite path only; they do not by themselves prove production effectiveness or MySQL privilege configuration.
 
 ---
 
@@ -34,7 +36,7 @@ All 74 control tests were executed through the hermetic automated testing suite 
 | **CTL-12** | **Tamper-Evident Audit Hash Chaining** | Inserted audit records and verified `previous_hash` and `entry_hash` linkage. | SHA-256 hash chain links each entry to preceding record; verification passes on untampered log. | Hash chain correctly generated; `verify_audit_log_integrity()` returns `(True, None)`. | **Effective** | [tests/test_cyber_controls.py::TestTamperEvidentAuditLog](../tests/test_cyber_controls.py#L60) |
 | **CTL-13** | **Audit Log Tamper Detection** | Directly altered an audit action string and altered a `previous_hash` pointer in SQLite. | `verify_audit_log_integrity()` must return `False` and return the exact corrupted `log_id`. | Tampering detected immediately; exact record IDs (e.g., `log_id=2`, `log_id=3`) flagged. | **Effective** | [tests/test_cyber_controls.py::TestTamperEvidentAuditLog](../tests/test_cyber_controls.py#L88) |
 | **CTL-14** | **Admin Account Unlock Remediation** | Locked account via 3 failed logins, then invoked admin `unlock_user()`. | `is_locked` reset to 0, `failed_attempts` reset to 0; user successfully logs in. | Account unlocked; user removed from locked accounts register. | **Effective** | [tests/test_cyber_controls.py::TestAdminAccountUnlock](../tests/test_cyber_controls.py#L190) |
-| **CTL-15** | **Security Alert Remediation** | Generated security alert with status `open`, then called `resolve_alert()`. | Alert status transitions to `resolved`; removed from open alerts view. | Alert status updated to `resolved`; audit record logged. | **Effective** | [tests/test_cyber_controls.py::TestSecurityAlertRemediation](../tests/test_cyber_controls.py#L225) |
+| **CTL-15** | **Security Alert Remediation** | Generated security alert, called `review_alert()`, then `close_alert()`. | Alert transitions `open` → `reviewed` → `closed`; each step has admin attribution. | Current test verifies the three-state workflow and rejects close-before-review. | **Effective on SQLite** | [tests/test_cyber_controls.py::TestSecurityAlertRemediation](../tests/test_cyber_controls.py) |
 | **CTL-16** | **ACID Transaction Atomicity & Rollback** | Simulated intentional error during deposit/withdraw/transfer midway through execution. | Entire multi-table transaction must roll back; balances remain unchanged. | Rollback verified; zero partial state or phantom funds created. | **Effective** | [tests/test_database.py::TestACIDDeposit](../tests/test_database.py#L170), `TestACIDWithdraw`, `TestACIDTransfer` |
 
 ---
@@ -44,4 +46,4 @@ To re-run and independently reproduce this test evidence on any workstation:
 ```bash
 python -m pytest tests/ -v
 ```
-All 74 tests execute hermetically in isolated memory or temporary storage, leaving no lingering artifacts or database locks.
+All 123 automated tests execute hermetically in isolated memory or temporary storage, leaving no intentional database artifacts or locks.

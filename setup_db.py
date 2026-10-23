@@ -9,11 +9,11 @@ What this script does (idempotent -- safe to run multiple times):
   3. Adds the `ip_address` column to Audit_Log if it is missing (migration).
   4. Creates / replaces the three stored procedures from sql/procedures.sql:
        deposit, withdraw, transfer
-  5. Creates / replaces the three triggers from sql/triggers.sql:
-       after_failed_login, after_transaction, after_user_login
+  5. Removes legacy audit-writing triggers. Audit entries and alerts are owned
+     by the Python transaction layer so every entry uses the hash chain exactly once.
   6. Creates a least-privilege MySQL user 'bank_app'@'localhost' and grants
-     only SELECT, INSERT, UPDATE on secure_banking.* (principle of least
-     privilege -- ISO 27001:2022 A.8.18 / A.5.15).  The bank_app password
+     only the required privileges per table (principle of least privilege).
+     The bank_app password
      must be set in .env as DB_APP_PASSWORD.  Root is used ONLY for this
      provisioning step; the running application uses bank_app.
   7. Runs diagnostic SELECTs to confirm the database is properly populated.
@@ -25,15 +25,16 @@ Configuration is read from .env (git-ignored).  See .env.example for keys.
 DB_TYPE must be set to 'mysql' for this script to connect.
 """
 
+import os
 import sys
 import pymysql
 import config
 import db
 
-
 # ---------------------------------------------------------------------------
 # Helper: raw PyMySQL connection (autocommit=True for DDL)
 # ---------------------------------------------------------------------------
+
 
 def _raw_conn():
     """Open a raw PyMySQL connection to secure_banking with autocommit."""
@@ -48,8 +49,6 @@ def _raw_conn():
     )
 
 
-import os
-
 DB_APP_USER = "bank_app"
 DB_APP_HOST = "localhost"
 
@@ -57,6 +56,7 @@ DB_APP_HOST = "localhost"
 # ---------------------------------------------------------------------------
 # Step 1 -- Ensure the database exists
 # ---------------------------------------------------------------------------
+
 
 def ensure_database():
     print(f"\n[1/6] Ensuring database '{config.DB_NAME}' exists ...")
@@ -83,15 +83,23 @@ def ensure_database():
 # Step 2 -- Create tables and seed demo data via db.init_db()
 # ---------------------------------------------------------------------------
 
+
 def init_schema():
     print("\n[2/6] Running db.init_db() to create tables and seed demo data ...")
     db.init_db()
+    # Only the provisioning account may run MySQL schema migrations.
+    conn = db.get_connection()
+    try:
+        db._migrate_mysql_alert_workflow(conn)
+    finally:
+        conn.close()
     print("    OK  All five tables created (IF NOT EXISTS) and demo data seeded.")
 
 
 # ---------------------------------------------------------------------------
 # Step 3 -- Column migration: add ip_address to Audit_Log if missing
 # ---------------------------------------------------------------------------
+
 
 def migrate_audit_log():
     print("\n[3/6] Checking Audit_Log.ip_address column ...")
@@ -118,6 +126,7 @@ def migrate_audit_log():
 # ---------------------------------------------------------------------------
 # Step 4 -- Stored procedures (from sql/procedures.sql logic)
 # ---------------------------------------------------------------------------
+
 
 def create_stored_procedures():
     print("\n[4/6] Creating stored procedures: deposit, withdraw, transfer ...")
@@ -180,8 +189,9 @@ def create_stored_procedures():
 # Step 5 -- Triggers (from sql/triggers.sql logic, corrected for MySQL 8)
 # ---------------------------------------------------------------------------
 
+
 def create_triggers():
-    print("\n[5/6] Creating triggers: after_failed_login, after_transaction, after_user_login ...")
+    print("\n[5/6] Removing legacy audit-writing triggers ...")
     conn = _raw_conn()
     try:
         with conn.cursor() as cur:
@@ -189,65 +199,11 @@ def create_triggers():
             for name in ("after_failed_login", "after_transaction", "after_user_login"):
                 cur.execute(f"DROP TRIGGER IF EXISTS `{name}`")
 
-            # BEFORE UPDATE so we can SET NEW.is_locked without error 1442
-            cur.execute("""
-            CREATE TRIGGER after_failed_login
-            BEFORE UPDATE ON Users
-            FOR EACH ROW
-            BEGIN
-                IF NEW.failed_attempts >= 3 THEN
-                    SET NEW.is_locked = 1;
-                    INSERT INTO Alerts (user_id, alert_type, description, severity)
-                    VALUES (NEW.user_id, 'Brute Force',
-                            'Account locked after 3 failed login attempts', 'high');
-                END IF;
-            END
-            """)
-
-            # after_transaction: logs to Audit_Log + raises large-txn alert
-            cur.execute("""
-            CREATE TRIGGER after_transaction
-            AFTER INSERT ON Transactions
-            FOR EACH ROW
-            BEGIN
-                INSERT INTO Audit_Log (user_id, action, ip_address)
-                SELECT a.user_id,
-                       CONCAT('Transaction of ', NEW.amount, ' type: ', NEW.txn_type),
-                       '0.0.0.0'
-                FROM Accounts a
-                WHERE a.account_id = NEW.from_account;
-
-                IF NEW.amount > 50000 THEN
-                    INSERT INTO Alerts (user_id, alert_type, description, severity)
-                    SELECT a.user_id,
-                           'Large Transaction',
-                           CONCAT('Suspicious large transaction of ', NEW.amount),
-                           'high'
-                    FROM Accounts a
-                    WHERE a.account_id = NEW.from_account;
-                END IF;
-            END
-            """)
-
-            cur.execute("""
-            CREATE TRIGGER after_user_login
-            AFTER UPDATE ON Users
-            FOR EACH ROW
-            BEGIN
-                IF NEW.failed_attempts = 0 AND OLD.failed_attempts > 0 THEN
-                    INSERT INTO Audit_Log (user_id, action, ip_address)
-                    VALUES (NEW.user_id, 'Successful Login', '0.0.0.0');
-                END IF;
-            END
-            """)
-
-            cur.execute(
-                "SELECT TRIGGER_NAME FROM INFORMATION_SCHEMA.TRIGGERS "
-                "WHERE TRIGGER_SCHEMA = %s",
-                (config.DB_NAME,),
-            )
-            trigs = [r[0] for r in cur.fetchall()]
-        print(f"    OK  Triggers: {trigs}")
+            # Intentionally leave no triggers that write security records.
+            # Python owns the transaction boundary and the audit hash chain.
+        print(
+            "    OK  Legacy triggers removed; Python transaction layer is authoritative."
+        )
     finally:
         conn.close()
 
@@ -255,6 +211,7 @@ def create_triggers():
 # ---------------------------------------------------------------------------
 # Step 6 -- Verification: show tables and seeded data
 # ---------------------------------------------------------------------------
+
 
 def verify():
     print("\n[6/6] Verification ...")
@@ -274,8 +231,10 @@ def verify():
             rows = cur.fetchall()
             print("    Seeded users & balances:")
             for r in rows:
-                print(f"      user_id={r[0]}  {r[1]:<20} {r[2]:<30} role={r[3]}  "
-                      f"balance=Rs {float(r[4]):,.2f}")
+                print(
+                    f"      user_id={r[0]}  {r[1]:<20} {r[2]:<30} role={r[3]}  "
+                    f"balance=Rs {float(r[4]):,.2f}"
+                )
 
             cur.execute(
                 "SELECT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES "
@@ -302,7 +261,9 @@ def verify():
     conn2.close()
     print(f"\n    db.get_connection() engine: {engine}")
     if engine != "MySQL":
-        print("    WARNING: application is NOT using MySQL -- check your .env DB_TYPE value.")
+        print(
+            "    WARNING: application is NOT using MySQL -- check your .env DB_TYPE value."
+        )
         sys.exit(1)
 
 
@@ -310,13 +271,15 @@ def verify():
 # Step 6 -- Least-privilege app user: bank_app
 # ---------------------------------------------------------------------------
 
+
 def create_app_user():
     """
     Create 'bank_app'@'localhost' with the minimum privileges the application
     needs at runtime (ISO 27001:2022 A.8.18 Privileged Access Rights / A.5.15
     Principle of Least Privilege).
 
-    Grants: SELECT, INSERT, UPDATE on secure_banking.* only.
+    Grants are table-specific. Audit_Log is append-only: it receives SELECT and
+    INSERT but never UPDATE or DELETE.
     No DROP, ALTER, GRANT, DELETE, or administrative privileges.
 
     The bank_app password is read from DB_APP_PASSWORD in .env.
@@ -331,7 +294,9 @@ def create_app_user():
         )
         return
 
-    print(f"\n[6/7] Creating least-privilege MySQL user '{DB_APP_USER}'@'{DB_APP_HOST}' ...")
+    print(
+        f"\n[6/7] Creating least-privilege MySQL user '{DB_APP_USER}'@'{DB_APP_HOST}' ..."
+    )
     admin = pymysql.connect(
         host=config.DB_HOST,
         port=config.DB_PORT,
@@ -353,17 +318,19 @@ def create_app_user():
                 f"ALTER USER '{DB_APP_USER}'@'{DB_APP_HOST}' IDENTIFIED BY %s",
                 (app_password,),
             )
-            # Grant exactly what the app needs -- no more
             cur.execute(
-                f"GRANT SELECT, INSERT, UPDATE ON `{config.DB_NAME}`.* "
-                f"TO '{DB_APP_USER}'@'{DB_APP_HOST}'"
+                f"REVOKE ALL PRIVILEGES, GRANT OPTION ON `{config.DB_NAME}`.* "
+                f"FROM '{DB_APP_USER}'@'{DB_APP_HOST}'"
             )
+            for table, privileges in config.APP_TABLE_GRANTS.items():
+                cur.execute(
+                    f"GRANT {', '.join(privileges)} ON `{config.DB_NAME}`.`{table}` "
+                    f"TO '{DB_APP_USER}'@'{DB_APP_HOST}'"
+                )
             cur.execute("FLUSH PRIVILEGES")
 
             # Verify
-            cur.execute(
-                f"SHOW GRANTS FOR '{DB_APP_USER}'@'{DB_APP_HOST}'"
-            )
+            cur.execute(f"SHOW GRANTS FOR '{DB_APP_USER}'@'{DB_APP_HOST}'")
             grants = [r[0] for r in cur.fetchall()]
         print(f"    OK  User '{DB_APP_USER}'@'{DB_APP_HOST}' created/updated.")
         for g in grants:

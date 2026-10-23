@@ -5,7 +5,7 @@
 **Assessment Scope:** Full application — authentication, authorization, data integrity, transaction processing, audit logging  
 **Assessment Date:** October 2026  
 **Assessor:** Ayush Kulhari  
-**Status:** All findings remediated and verified by automated test suite (74/74 passed)
+**Status:** Legacy assessment baseline. The current working copy has 123 passing SQLite tests, but the Phase 3/MySQL findings are still being closed and this document is not a production assurance report.
 
 ---
 
@@ -41,7 +41,7 @@ An initial security assessment of the **Secure Banking System** identified **10 
 
 ## 3. Verification Instructions
 
-To independently reproduce all findings as **fixed** on any clean clone:
+To reproduce the legacy findings and the current SQLite test evidence on a clean clone:
 
 ```bash
 git clone https://github.com/ayushkulhari47/secure-banking-system-dbms-cyber.git
@@ -49,7 +49,11 @@ cd secure-banking-system-dbms-cyber
 python -m venv venv && venv\Scripts\activate   # Windows
 pip install -r requirements.txt
 python -m pytest tests/ -v
-# Expected: 74 passed, 0 failed
+# Current working-copy result: 123 passed, 0 failed on SQLite
+
+This report does not prove the MySQL least-privilege grants or a production
+deployment. Run `python verify_least_privilege.py` only after provisioning a
+real MySQL instance with the runtime account.
 ```
 
 ---

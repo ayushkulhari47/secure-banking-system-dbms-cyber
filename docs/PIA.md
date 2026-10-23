@@ -61,7 +61,7 @@ The following technical controls prevent personal data exposure and unauthorized
 |---|---|---|
 | **Right to Access Information** | DPDP Act Sec. 11 | Users can view their personal account details, current balance, and historical ledger at any time via `view_balance()` and `view_transactions()` in [app.py](../app.py#L219). |
 | **Right to Correction & Updating** | DPDP Act Sec. 12 | Administrators can update customer profile information and unlock falsely locked accounts via `unlock_user()` in [db.py](../db.py#L344). |
-| **Right to Grievance Redressal** | DPDP Act Sec. 13 | Security alerts raised by the system are tracked with unique IDs (`Alerts.alert_id`) and reviewed/resolved by administrators via `resolve_alert()` in [db.py](../db.py#L399). |
+| **Right to Grievance Redressal** | DPDP Act Sec. 13 | Security alerts raised by the system are tracked with unique IDs (`Alerts.alert_id`) and reviewed/closed by administrators via `review_alert()` and `close_alert()` in [db.py](../db.py). |
 
 ---
 

@@ -58,7 +58,7 @@ erDiagram
         TEXT alert_type "'Brute Force' | 'Large Transaction' | 'Audit Tampering'"
         TEXT description "Contextual threat narrative"
         TEXT severity "'low' | 'medium' | 'high'"
-        TEXT status "'open' | 'resolved'"
+        TEXT status "'open' | 'reviewed' | 'closed'"
         TEXT alert_time "Timestamp of alert trigger (UTC)"
     }
 ```
@@ -94,7 +94,7 @@ erDiagram
 | `previous_hash` | `Audit_Log` | `TEXT` | Cryptographic SHA-256 pointer to preceding audit row (genesis block initialized with 64 zeroes). |
 | `entry_hash` | `Audit_Log` | `TEXT` | `SHA-256(previous_hash \|\| user_id \|\| action \|\| log_time)`; provides mathematical tamper-evidence. |
 | `severity` | `Alerts` | `TEXT` | Incident triage rating (`low`, `medium`, `high`) aligned with NIST SP 800-61 Rev. 2. |
-| `status` | `Alerts` | `TEXT` | Remediation lifecycle tracker (`open`, `resolved`) ensuring every raised threat is formally investigated and closed. |
+| `status` | `Alerts` | `TEXT` | Remediation lifecycle tracker (`open`, `reviewed`, `closed`) ensuring every raised threat is investigated and formally closed. |
 
 ---
 

@@ -25,10 +25,10 @@ from config import (
     MIN_PASSWORD_LENGTH,
 )
 
-
 # ---------------------------------------------------------------------------
 # SEC-01  Amount validation
 # ---------------------------------------------------------------------------
+
 
 def validate_amount(amount: float) -> tuple:
     """
@@ -63,6 +63,7 @@ def validate_amount(amount: float) -> tuple:
 # SEC-02 / SEC-03  Safe input wrappers
 # ---------------------------------------------------------------------------
 
+
 def safe_float_input(prompt: str) -> Optional[float]:
     """
     Display prompt, read a line, and return a float.
@@ -75,7 +76,9 @@ def safe_float_input(prompt: str) -> Optional[float]:
     try:
         return float(raw)
     except ValueError:
-        print(f"  [!] Invalid input: '{raw}' is not a number. Please enter a numeric value.")
+        print(
+            f"  [!] Invalid input: '{raw}' is not a number. Please enter a numeric value."
+        )
         return None
 
 
@@ -88,13 +91,16 @@ def safe_int_input(prompt: str) -> Optional[int]:
     try:
         return int(raw)
     except ValueError:
-        print(f"  [!] Invalid input: '{raw}' is not a whole number. Please enter an integer.")
+        print(
+            f"  [!] Invalid input: '{raw}' is not a whole number. Please enter an integer."
+        )
         return None
 
 
 # ---------------------------------------------------------------------------
 # SEC-04  Password policy
 # ---------------------------------------------------------------------------
+
 
 def password_meets_policy(password: str) -> tuple:
     """
@@ -135,6 +141,7 @@ def password_meets_policy(password: str) -> tuple:
 # ---------------------------------------------------------------------------
 # SEC-05  Session inactivity timeout
 # ---------------------------------------------------------------------------
+
 
 class Session:
     """
@@ -183,7 +190,7 @@ _SQLI_PATTERNS = re.compile(
 )
 
 # Velocity: maximum transactions within a rolling window (intrusion signal)
-VELOCITY_WINDOW_SECONDS: int = 60   # rolling window
+VELOCITY_WINDOW_SECONDS: int = 60  # rolling window
 VELOCITY_MAX_TRANSACTIONS: int = 10  # alert if exceeded in window
 
 
@@ -237,3 +244,16 @@ def check_velocity(
         return True, count
     return False, count
 
+
+def is_odd_hour(timestamp=None) -> bool:
+    """Return True for transactions submitted during the configured quiet hours.
+
+    The default rule treats 23:00 through 05:59 UTC as an unusual hour. The
+    caller can pass a timezone-aware ``datetime`` in tests or deployments that
+    use a local business timezone.
+    """
+    from datetime import datetime, timezone
+
+    moment = timestamp or datetime.now(timezone.utc)
+    hour = moment.hour
+    return hour >= 23 or hour < 6

@@ -17,6 +17,9 @@ Phase 2 changes vs Phase 1:
 
 import db
 import security
+import getpass
+import time
+from collections import defaultdict
 from config import (
     LARGE_TXN_THRESHOLD,
     MAX_FAILED_LOGINS,
@@ -28,10 +31,16 @@ from security import (
     Session,
 )
 
+# Process-local velocity signal. The database remains the source of truth for
+# transactions; this short-window detector is an additional online signal and
+# is intentionally not treated as a transaction authorization control.
+_TRANSACTION_TIMES = defaultdict(list)
+
 
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
+
 
 def login() -> tuple:
     """
@@ -47,13 +56,25 @@ def login() -> tuple:
     """
     print("\n--- Login ---")
     email = input("Email: ").strip()
-    password = input("Password: ").strip()
+    password = getpass.getpass("Password: ")
+
+    if security.detect_sqli(email):
+        db.log_action(None, "SQL injection pattern detected during login")
+        db.raise_alert(
+            None,
+            "SQL Injection Signal",
+            "Suspicious login input pattern detected",
+            severity="high",
+        )
 
     user = db.get_user_by_email(email)
 
     if user is None:
-        db.log_action(None, f"Failed login -- unknown email attempted: {email}")
-        print("User not found!")
+        # Run a dummy bcrypt check so unknown-email and wrong-password paths
+        # have comparable work, and never disclose whether an email exists.
+        db.verify_password(password, db.DUMMY_PASSWORD_HASH)
+        db.log_action(None, "Failed login -- invalid credentials")
+        print("Invalid email or password.")
         return None, None
 
     if user["is_locked"]:
@@ -86,9 +107,32 @@ def login() -> tuple:
     return None, None
 
 
+def _record_transaction_signals(user_id: int, action: str) -> None:
+    """Record online fraud signals after a committed financial operation."""
+    now = time.monotonic()
+    times = _TRANSACTION_TIMES[user_id]
+    times.append(now)
+    flagged, count = security.check_velocity(times)
+    if flagged:
+        db.raise_alert(
+            user_id,
+            "Rapid Transactions",
+            f"{count} transactions detected within {security.VELOCITY_WINDOW_SECONDS} seconds",
+            severity="high",
+        )
+    if security.is_odd_hour():
+        db.raise_alert(
+            user_id,
+            "Odd-Hour Transaction",
+            f"{action} submitted during configured quiet hours",
+            severity="medium",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Banking operations  (Phase 2: input-safe, amount-validated)
 # ---------------------------------------------------------------------------
+
 
 def do_deposit(user_id: int, session: Session) -> None:
     """
@@ -111,6 +155,7 @@ def do_deposit(user_id: int, session: Session) -> None:
 
     db.deposit(acc["account_id"], amount)
     db.log_action(user_id, f"Deposited Rs{amount:.2f}")
+    _record_transaction_signals(user_id, "Deposit")
     updated = db.get_account_by_user(user_id)
     print(f"Rs{amount:.2f} deposited!  New balance: Rs{updated['balance']:.2f}")
     session.refresh()
@@ -138,6 +183,7 @@ def do_withdraw(user_id: int, session: Session) -> None:
     success = db.withdraw(acc["account_id"], amount)
     if success:
         db.log_action(user_id, f"Withdrew Rs{amount:.2f}")
+        _record_transaction_signals(user_id, "Withdrawal")
         if amount > LARGE_TXN_THRESHOLD:
             db.raise_alert(
                 user_id,
@@ -177,7 +223,9 @@ def do_transfer(user_id: int, session: Session) -> None:
     # SEC-06: Block self-transfer.
     if to_acc_id == acc["account_id"]:
         print("  [!] Self-transfer is not permitted.")
-        db.log_action(user_id, f"Rejected self-transfer attempt on account {acc['account_id']}")
+        db.log_action(
+            user_id, f"Rejected self-transfer attempt on account {acc['account_id']}"
+        )
         return
 
     dest = db.get_account_by_id(to_acc_id)
@@ -197,27 +245,43 @@ def do_transfer(user_id: int, session: Session) -> None:
 
     # Route to Maker-Checker dual control if amount exceeds large transaction threshold
     if amount > LARGE_TXN_THRESHOLD:
-        txn_id = db.create_pending_transfer(acc["account_id"], to_acc_id, amount)
+        try:
+            txn_id = db.create_pending_transfer(acc["account_id"], to_acc_id, amount)
+        except ValueError as exc:
+            print(f"  [!] Transfer not submitted: {exc}")
+            db.log_action(user_id, f"Rejected pending transfer attempt -- {exc}")
+            session.refresh()
+            return
         db.log_action(
             user_id,
-            f"Initiated transfer #{txn_id} of Rs{amount:.2f} to account {to_acc_id} (pending Maker-Checker approval)",
+            f"Initiated transfer #{txn_id} of Rs{amount:.2f} to account {to_acc_id} "
+            "(pending Maker-Checker approval)",
         )
         db.raise_alert(
             user_id,
             "Large Transaction Pending Approval",
-            f"Transfer #{txn_id} of Rs{amount:.2f} to account {to_acc_id} queued for Maker-Checker dual control",
+            f"Transfer #{txn_id} of Rs{amount:.2f} to account {to_acc_id} "
+            "queued for Maker-Checker dual control",
             severity="high",
         )
-        print(f"\n  [!] Large Transaction Notice (Maker-Checker Control):")
-        print(f"      Transfer of Rs{amount:,.2f} exceeds policy limit of Rs{LARGE_TXN_THRESHOLD:,.2f}.")
+        _record_transaction_signals(user_id, "Pending transfer")
+        print("\n  [!] Large Transaction Notice (Maker-Checker Control):")
+        print(
+            f"      Transfer of Rs{amount:,.2f} exceeds policy limit of "
+            f"Rs{LARGE_TXN_THRESHOLD:,.2f}."
+        )
         print(f"      Transaction #{txn_id} has been submitted with status 'pending'.")
-        print("      Dual-control policy requires an administrator/checker to approve before execution.")
+        print(
+            "      Dual-control policy requires an administrator/checker "
+            "to approve before execution."
+        )
         session.refresh()
         return
 
     success = db.transfer(acc["account_id"], to_acc_id, amount)
     if success:
         db.log_action(user_id, f"Transferred Rs{amount:.2f} to account {to_acc_id}")
+        _record_transaction_signals(user_id, "Transfer")
         updated = db.get_account_by_user(user_id)
         print(f"Rs{amount:.2f} transferred!  New balance: Rs{updated['balance']:.2f}")
     else:
@@ -228,6 +292,7 @@ def do_transfer(user_id: int, session: Session) -> None:
 # ---------------------------------------------------------------------------
 # View functions
 # ---------------------------------------------------------------------------
+
 
 def view_balance(user_id: int, session: Session) -> None:
     acc = db.get_account_by_user(user_id)
@@ -245,7 +310,7 @@ def view_transactions(user_id: int, role: str, session: Session) -> None:
     """
     print("\n--- Transaction History ---")
     if role == "admin":
-        rows = db.get_all_transactions()
+        rows = db.get_all_transactions(admin_user_id=user_id)
     else:
         acc = db.get_account_by_user(user_id)
         if acc is None:
@@ -277,10 +342,12 @@ def view_audit_log(user_id: int, role: str, session: Session) -> None:
         db.log_action(user_id, "RBAC violation: unauthorized attempt to view audit log")
         return
     print("\n--- Audit Log (Cryptographic Hash Chained) ---")
-    rows = db.get_audit_log()
+    rows = db.get_audit_log(admin_user_id=user_id)
     for row in rows:
         uid = str(row["user_id"]) if row["user_id"] is not None else "UNKNOWN"
-        print(f"  ID:{row['log_id']:<4} User:{uid:<8} {row['action']:<46} {row['log_time']}")
+        print(
+            f"  ID:{row['log_id']:<4} User:{uid:<8} {row['action']:<46} {row['log_time']}"
+        )
     session.refresh()
 
 
@@ -294,7 +361,7 @@ def view_alerts(user_id: int, role: str, session: Session) -> None:
         db.log_action(user_id, "RBAC violation: unauthorized attempt to view alerts")
         return
     print("\n--- Security Alerts ---")
-    rows = db.get_all_alerts()
+    rows = db.get_all_alerts(admin_user_id=user_id)
     if not rows:
         print("No alerts.")
         session.refresh()
@@ -312,6 +379,7 @@ def view_alerts(user_id: int, role: str, session: Session) -> None:
 # Change Password (Phase 3 -- ISO 27001:2022 A.5.17)
 # ---------------------------------------------------------------------------
 
+
 def do_change_password(user_id: int, session: Session) -> None:
     """
     Allow any authenticated user to change their own password.
@@ -325,6 +393,7 @@ def do_change_password(user_id: int, session: Session) -> None:
     """
     print("\n--- Change Password ---")
     import getpass
+
     old_pw = getpass.getpass("Current password: ")
     new_pw = getpass.getpass("New password: ")
     new_pw2 = getpass.getpass("Confirm new password: ")
@@ -345,6 +414,7 @@ def do_change_password(user_id: int, session: Session) -> None:
 # Phase 3 Admin Control Consoles (Maker-Checker, Unlock, Alert Resolution, Integrity)
 # ---------------------------------------------------------------------------
 
+
 def manage_pending_transfers(user_id: int, role: str, session: Session) -> None:
     """
     RBAC: Admin-only. Maker-Checker dual control console.
@@ -352,11 +422,13 @@ def manage_pending_transfers(user_id: int, role: str, session: Session) -> None:
     """
     if role != "admin":
         print("  [!] Access denied -- admin only.")
-        db.log_action(user_id, "RBAC violation: unauthorized attempt to manage pending transfers")
+        db.log_action(
+            user_id, "RBAC violation: unauthorized attempt to manage pending transfers"
+        )
         return
 
     print("\n--- Pending Transfers (Maker-Checker Dual Control) ---")
-    rows = db.get_pending_transfers()
+    rows = db.get_pending_transfers(admin_user_id=user_id)
     if not rows:
         print("No pending transfers awaiting approval.")
         session.refresh()
@@ -364,8 +436,10 @@ def manage_pending_transfers(user_id: int, role: str, session: Session) -> None:
 
     for t in rows:
         print(
-            f"  Txn #{t['txn_id']} | From Acc:{t['from_account']} ({t['sender_name']} / {t['sender_email']}) "
-            f"-> To Acc:{t['to_account']} | Amount: Rs{t['amount']:,.2f} | Submitted: {t['txn_time']}"
+            f"  Txn #{t['txn_id']} | From Acc:{t['from_account']} "
+            f"({t['sender_name']} / {t['sender_email']}) "
+            f"-> To Acc:{t['to_account']} | Amount: Rs{t['amount']:,.2f} | "
+            f"Submitted: {t['txn_time']}"
         )
 
     txn_id_input = safe_int_input("\nEnter Txn ID to act on (or 0 to cancel): ")
@@ -382,7 +456,9 @@ def manage_pending_transfers(user_id: int, role: str, session: Session) -> None:
             print(f"  [!] Approval failed: {msg}")
     elif action == "R":
         reason = input("Enter rejection reason (or leave blank): ").strip()
-        success, msg = db.reject_pending_transfer(txn_id_input, user_id, reason or "Rejected by administrator")
+        success, msg = db.reject_pending_transfer(
+            txn_id_input, user_id, reason or "Rejected by administrator"
+        )
         if success:
             print(f"  [+] {msg}")
         else:
@@ -399,7 +475,9 @@ def manage_locked_users(user_id: int, role: str, session: Session) -> None:
     """
     if role != "admin":
         print("  [!] Access denied -- admin only.")
-        db.log_action(user_id, "RBAC violation: unauthorized attempt to unlock accounts")
+        db.log_action(
+            user_id, "RBAC violation: unauthorized attempt to unlock accounts"
+        )
         return
 
     print("\n--- Locked User Accounts ---")
@@ -430,7 +508,7 @@ def manage_locked_users(user_id: int, role: str, session: Session) -> None:
 def manage_alerts(user_id: int, role: str, session: Session) -> None:
     """
     RBAC: Admin-only.
-    View security alerts and mark resolved (Audit incident response remediation).
+    View alerts and move them through open -> reviewed -> closed.
     """
     if role != "admin":
         print("  [!] Access denied -- admin only.")
@@ -438,7 +516,7 @@ def manage_alerts(user_id: int, role: str, session: Session) -> None:
         return
 
     print("\n--- Security Alerts Console ---")
-    rows = db.get_all_alerts()
+    rows = db.get_all_alerts(admin_user_id=user_id)
     if not rows:
         print("No alerts recorded.")
         session.refresh()
@@ -451,14 +529,27 @@ def manage_alerts(user_id: int, role: str, session: Session) -> None:
             f"Type:{a['alert_type']} | {a['description']} [{a['alert_time']}]"
         )
 
-    open_alerts = [a for a in rows if a["status"] == "open"]
-    if open_alerts:
-        alert_id_input = safe_int_input("\nEnter Alert ID to resolve (or 0 to return): ")
+    actionable = [a for a in rows if a["status"] in {"open", "reviewed"}]
+    if actionable:
+        alert_id_input = safe_int_input("\nEnter Alert ID to act on (or 0 to return): ")
         if alert_id_input:
-            if db.resolve_alert(alert_id_input, admin_user_id=user_id):
-                print(f"  [+] Alert #{alert_id_input} marked as resolved.")
+            target = next(
+                (a for a in actionable if a["alert_id"] == alert_id_input), None
+            )
+            if target is None:
+                print("  [!] Alert not found or already closed.")
+            elif target["status"] == "open":
+                note = input("Review note (optional): ").strip()
+                if db.review_alert(alert_id_input, user_id, note):
+                    print(f"  [+] Alert #{alert_id_input} marked as reviewed.")
+                else:
+                    print("  [!] Alert could not be reviewed.")
             else:
-                print(f"  [!] Alert #{alert_id_input} not found.")
+                note = input("Closure note (optional): ").strip()
+                if db.close_alert(alert_id_input, user_id, note):
+                    print(f"  [+] Alert #{alert_id_input} marked as closed.")
+                else:
+                    print("  [!] Alert could not be closed.")
     session.refresh()
 
 
@@ -469,7 +560,9 @@ def verify_audit_integrity_menu(user_id: int, role: str, session: Session) -> No
     """
     if role != "admin":
         print("  [!] Access denied -- admin only.")
-        db.log_action(user_id, "RBAC violation: unauthorized attempt to verify audit log")
+        db.log_action(
+            user_id, "RBAC violation: unauthorized attempt to verify audit log"
+        )
         return
 
     print("\n--- Audit Log Cryptographic Integrity Verification ---")
@@ -479,7 +572,9 @@ def verify_audit_integrity_menu(user_id: int, role: str, session: Session) -> No
         print("      No records have been modified, deleted, or inserted out of order.")
     else:
         print(f"  [!] TAMPERING DETECTED at log_id={bad_id}!")
-        print("      Hash pointer mismatch indicates unauthorized database modification.")
+        print(
+            "      Hash pointer mismatch indicates unauthorized database modification."
+        )
         db.raise_alert(
             user_id,
             "Audit Log Tampering",
@@ -492,6 +587,7 @@ def verify_audit_integrity_menu(user_id: int, role: str, session: Session) -> No
 # ---------------------------------------------------------------------------
 # Menu  (Session timeout enforced on every iteration)
 # ---------------------------------------------------------------------------
+
 
 def menu(user_id: int, role: str) -> None:
     """
@@ -514,7 +610,9 @@ def menu(user_id: int, role: str) -> None:
 
         mins = int(session.seconds_remaining() // 60)
         secs = int(session.seconds_remaining() % 60)
-        print(f"\n--- Banking Menu ({role.upper()}) --- [session expires in {mins}m {secs}s]")
+        print(
+            f"\n--- Banking Menu ({role.upper()}) --- [session expires in {mins}m {secs}s]"
+        )
         print("1. View Balance")
         print("2. Deposit")
         print("3. Withdraw")

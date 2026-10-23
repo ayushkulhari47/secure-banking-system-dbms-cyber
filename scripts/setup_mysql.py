@@ -13,18 +13,22 @@ import config
 
 
 def main():
-    print(f"Connecting to MySQL at {config.DB_HOST}:{config.DB_PORT} as {config.DB_USER}...")
-    
+    print(
+        f"Connecting to MySQL at {config.DB_HOST}:{config.DB_PORT} as {config.DB_USER}..."
+    )
+
     # 1. Connect without database to ensure DB exists
     conn = pymysql.connect(
         host=config.DB_HOST,
         port=config.DB_PORT,
         user=config.DB_USER,
         password=config.DB_PASSWORD,
-        autocommit=True
+        autocommit=True,
     )
     with conn.cursor() as cur:
-        cur.execute(f"CREATE DATABASE IF NOT EXISTS `{config.DB_NAME}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+        cur.execute(
+            f"CREATE DATABASE IF NOT EXISTS `{config.DB_NAME}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+        )
         print(f"Database `{config.DB_NAME}` verified/created.")
     conn.close()
 
@@ -35,12 +39,13 @@ def main():
         user=config.DB_USER,
         password=config.DB_PASSWORD,
         database=config.DB_NAME,
-        autocommit=True
+        autocommit=True,
     )
     cur = conn.cursor()
 
     # 3. Ensure schema tables exist (Users, Accounts, Transactions, Audit_Log, Alerts)
     import db
+
     db.init_db()
     print("Application schema & seed verified.")
 
@@ -154,6 +159,7 @@ def main():
 
     conn.close()
     print("MySQL database setup & verification complete!")
+
 
 if __name__ == "__main__":
     main()

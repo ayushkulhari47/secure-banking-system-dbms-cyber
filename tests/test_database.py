@@ -20,6 +20,7 @@ import pytest
 # Fixtures -- build an isolated in-memory database for each test
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture()
 def mem_conn():
     """
@@ -106,6 +107,7 @@ def mem_conn():
 # Schema / constraint tests
 # ---------------------------------------------------------------------------
 
+
 class TestSchema:
     """Control: DB-level data integrity constraints."""
 
@@ -115,9 +117,7 @@ class TestSchema:
         at the database layer -- second line of defence after application logic.
         """
         with pytest.raises(sqlite3.IntegrityError):
-            mem_conn.execute(
-                "UPDATE Accounts SET balance = -1.00 WHERE account_id = 1"
-            )
+            mem_conn.execute("UPDATE Accounts SET balance = -1.00 WHERE account_id = 1")
 
     def test_transaction_amount_must_be_positive(self, mem_conn):
         """
@@ -167,6 +167,7 @@ class TestSchema:
 # ACID transaction tests
 # ---------------------------------------------------------------------------
 
+
 class TestACIDDeposit:
     """Control: Deposit is atomic -- balance update AND transaction record
     either both succeed or both roll back."""
@@ -215,9 +216,9 @@ class TestACIDDeposit:
         balance_after = mem_conn.execute(
             "SELECT balance FROM Accounts WHERE account_id = 1"
         ).fetchone()["balance"]
-        assert balance_after == original_balance, (
-            "ROLLBACK must restore the original balance"
-        )
+        assert (
+            balance_after == original_balance
+        ), "ROLLBACK must restore the original balance"
 
 
 class TestACIDWithdraw:
@@ -252,8 +253,7 @@ class TestACIDWithdraw:
         """
         with pytest.raises(sqlite3.IntegrityError):
             mem_conn.execute(
-                "UPDATE Accounts SET balance = balance - 999999"
-                " WHERE account_id = 1"
+                "UPDATE Accounts SET balance = balance - 999999" " WHERE account_id = 1"
             )
 
 
@@ -332,6 +332,7 @@ class TestACIDTransfer:
 # Audit log tests
 # ---------------------------------------------------------------------------
 
+
 class TestAuditLog:
     """Control: Every significant action is recorded with a timestamp."""
 
@@ -365,6 +366,7 @@ class TestAuditLog:
 # Alert tests
 # ---------------------------------------------------------------------------
 
+
 class TestAlerts:
     """Control: Suspicious events generate alerts with severity classification."""
 
@@ -397,6 +399,7 @@ class TestAlerts:
 # ---------------------------------------------------------------------------
 # Data persistence simulation
 # ---------------------------------------------------------------------------
+
 
 class TestPersistence:
     """

@@ -13,17 +13,17 @@ Run: pytest tests/test_phase3.py -v
 
 import time
 import pytest
-import sqlite3
 import bcrypt
+from datetime import datetime, timezone
 
 import db
 import security
 from security import validate_amount, detect_sqli, check_velocity
 
-
 # ---------------------------------------------------------------------------
 # Shared fixture -- hermetic SQLite database
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def test_db(tmp_path, monkeypatch):
@@ -42,6 +42,7 @@ def test_db(tmp_path, monkeypatch):
 # TestChangePassword
 # ---------------------------------------------------------------------------
 
+
 class TestChangePassword:
     """
     Control: Password change enforces old-password verification, complexity
@@ -57,7 +58,9 @@ class TestChangePassword:
             "INSERT INTO Users (name, email, password_hash, role) VALUES (?, ?, ?, ?)",
             ("Tester", "changeme@test.com", db.hash_password("OldPass1!"), "user"),
         )
-        conn.execute("INSERT INTO Accounts (user_id, balance) VALUES (last_insert_rowid(), 0)")
+        conn.execute(
+            "INSERT INTO Accounts (user_id, balance) VALUES (last_insert_rowid(), 0)"
+        )
         conn.close()
 
         user = db.get_user_by_email("changeme@test.com")
@@ -123,6 +126,7 @@ class TestChangePassword:
         """app.do_change_password must abort if confirm password does not match."""
         import app
         import getpass
+
         session = security.Session()
         inputs = iter(["Current1!", "NewPass1!", "MismatchPass2!"])
         monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(inputs))
@@ -135,6 +139,7 @@ class TestChangePassword:
         """app.do_change_password executes and refreshes session on success."""
         import app
         import getpass
+
         session = security.Session()
         inputs = iter(["ayush123", "NewSecure1@Pass", "NewSecure1@Pass"])
         monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(inputs))
@@ -148,6 +153,7 @@ class TestChangePassword:
         """app.do_change_password reports error when old password is wrong."""
         import app
         import getpass
+
         session = security.Session()
         inputs = iter(["WrongOld123!", "NewSecure1@Pass", "NewSecure1@Pass"])
         monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(inputs))
@@ -162,6 +168,7 @@ class TestChangePassword:
 # TestSQLiDetection
 # ---------------------------------------------------------------------------
 
+
 class TestSQLiDetection:
     """
     Control: detect_sqli() identifies SQL injection payloads so the application
@@ -171,39 +178,89 @@ class TestSQLiDetection:
     is a defence-in-depth intrusion detection layer.
     """
 
-    @pytest.mark.parametrize("payload", [
-        "' OR 1=1 --",
-        "' OR '1'='1",
-        "1; DROP TABLE Users",
-        "UNION SELECT * FROM Users",
-        "admin'--",
-        "1 AND 1=1",
-        "'; EXEC xp_cmdshell('dir'); --",
-        "1' WAITFOR DELAY '0:0:5'--",
-        "1; SLEEP(5)--",
-        "' CAST(1 AS INT)--",
-        "/* comment */",
-    ])
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "' OR 1=1 --",
+            "' OR '1'='1",
+            "1; DROP TABLE Users",
+            "UNION SELECT * FROM Users",
+            "admin'--",
+            "1 AND 1=1",
+            "'; EXEC xp_cmdshell('dir'); --",
+            "1' WAITFOR DELAY '0:0:5'--",
+            "1; SLEEP(5)--",
+            "' CAST(1 AS INT)--",
+            "/* comment */",
+        ],
+    )
     def test_sqli_payload_detected(self, payload):
         """Classic SQL injection payloads must be flagged."""
         assert detect_sqli(payload) is True, f"Expected detection for: {payload!r}"
 
-    @pytest.mark.parametrize("safe_input", [
-        "ayush@bank.com",
-        "Rahul Sharma",
-        "100.00",
-        "Transfer to savings",
-        "2024-01-01",
-        "account_number_123",
-    ])
+    @pytest.mark.parametrize(
+        "safe_input",
+        [
+            "ayush@bank.com",
+            "Rahul Sharma",
+            "100.00",
+            "Transfer to savings",
+            "2024-01-01",
+            "account_number_123",
+        ],
+    )
     def test_clean_input_not_flagged(self, safe_input):
         """Legitimate input must NOT trigger false positives."""
         assert detect_sqli(safe_input) is False, f"False positive for: {safe_input!r}"
 
 
+class TestRuntimeDatabaseSafety:
+    """The configured database engine must not silently change on failure."""
+
+    def test_mysql_connection_failure_is_not_replaced_with_sqlite(self, monkeypatch):
+        monkeypatch.setattr(db, "DB_TYPE", "mysql")
+
+        def fail_connection():
+            raise RuntimeError("MySQL unavailable")
+
+        monkeypatch.setattr(db, "get_mysql_connection", fail_connection)
+        with pytest.raises(RuntimeError, match="MySQL unavailable"):
+            db.get_connection()
+
+
+class TestAuthenticationPrivacy:
+    """Login errors must not reveal whether an email exists."""
+
+    def test_unknown_email_uses_generic_message(self, test_db, monkeypatch, capsys):
+        import app
+        import getpass
+
+        monkeypatch.setattr("builtins.input", lambda prompt: "unknown@example.com")
+        monkeypatch.setattr(getpass, "getpass", lambda prompt="": "WrongPass1!")
+
+        assert app.login() == (None, None)
+        output = capsys.readouterr().out.lower()
+        assert "invalid email or password" in output
+        assert "user not found" not in output
+
+
+class TestOddHourDetection:
+    def test_odd_hour_rule_covers_overnight_window(self):
+        assert (
+            security.is_odd_hour(datetime(2026, 1, 1, 23, tzinfo=timezone.utc)) is True
+        )
+        assert (
+            security.is_odd_hour(datetime(2026, 1, 1, 2, tzinfo=timezone.utc)) is True
+        )
+        assert (
+            security.is_odd_hour(datetime(2026, 1, 1, 12, tzinfo=timezone.utc)) is False
+        )
+
+
 # ---------------------------------------------------------------------------
 # TestVelocityDetection
 # ---------------------------------------------------------------------------
+
 
 class TestVelocityDetection:
     """
@@ -231,8 +288,10 @@ class TestVelocityDetection:
         """Transactions older than window_seconds must not count."""
         now = time.monotonic()
         old_times = [now - 120 for _ in range(15)]  # 2 minutes ago
-        recent = [now - 5]                            # only 1 recent
-        flagged, count = check_velocity(old_times + recent, window_seconds=60, max_allowed=10)
+        recent = [now - 5]  # only 1 recent
+        flagged, count = check_velocity(
+            old_times + recent, window_seconds=60, max_allowed=10
+        )
         assert flagged is False
         assert count == 1
 
@@ -254,6 +313,7 @@ class TestVelocityDetection:
 # ---------------------------------------------------------------------------
 # TestTransferAtomic
 # ---------------------------------------------------------------------------
+
 
 class TestTransferAtomic:
     """
@@ -278,7 +338,7 @@ class TestTransferAtomic:
         assert acc1_after["balance"] + acc2_after["balance"] == total_before
 
     def test_transfer_insufficient_balance_returns_false(self, test_db):
-        """Transfer when sender has insufficient funds returns False and leaves balances unchanged."""
+        """Insufficient funds return False and leave balances unchanged."""
         acc1 = db.get_account_by_user(1)
         acc2 = db.get_account_by_user(2)
 
@@ -303,11 +363,13 @@ class TestTransferAtomic:
     def test_validate_amount_blocks_nan(self):
         """NaN must be rejected."""
         import math
+
         ok, reason = validate_amount(math.nan)
         assert ok is False
 
     def test_validate_amount_blocks_infinity(self):
         """Infinite amounts must be rejected."""
         import math
+
         ok, reason = validate_amount(math.inf)
         assert ok is False
