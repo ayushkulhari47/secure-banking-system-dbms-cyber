@@ -234,7 +234,8 @@ CREATE TABLE IF NOT EXISTS Audit_Log (
     action        TEXT NOT NULL,
     log_time      TEXT NOT NULL DEFAULT (datetime('now')),
     previous_hash TEXT,
-    entry_hash    TEXT
+    entry_hash    TEXT,
+    ip_address    TEXT
 );
 
 CREATE TABLE IF NOT EXISTS Alerts (
@@ -292,6 +293,7 @@ CREATE TABLE IF NOT EXISTS Audit_Log (
     log_time      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     previous_hash VARCHAR(64) NULL,
     entry_hash    VARCHAR(64) NULL,
+    ip_address    VARCHAR(45) NULL,
     FOREIGN KEY (user_id) REFERENCES Users(user_id)
 );
 
@@ -326,10 +328,13 @@ def init_db() -> None:
                 conn.execute("ALTER TABLE Audit_Log ADD COLUMN previous_hash TEXT")
             if "entry_hash" not in audit_cols:
                 conn.execute("ALTER TABLE Audit_Log ADD COLUMN entry_hash TEXT")
+            if "ip_address" not in audit_cols:
+                conn.execute("ALTER TABLE Audit_Log ADD COLUMN ip_address TEXT")
 
         _seed_if_empty(conn)
     finally:
         conn.close()
+
 
 
 # ---------------------------------------------------------------------------

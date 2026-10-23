@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""
+setup_db.py  --  Provision the MySQL database for the Secure Banking System.
+
+What this script does (idempotent -- safe to run multiple times):
+  1. Connects to MySQL and creates the `secure_banking` database if absent.
+  2. Runs db.init_db() to create all five tables (IF NOT EXISTS) and seed
+     demo users / accounts via the application's own code path.
+  3. Adds the `ip_address` column to Audit_Log if it is missing (migration).
+  4. Creates / replaces the three stored procedures from sql/procedures.sql:
+       deposit, withdraw, transfer
+  5. Creates / replaces the three triggers from sql/triggers.sql:
+       after_failed_login, after_transaction, after_user_login
+  6. Runs diagnostic SELECTs to confirm the database is properly populated.
+
+Usage:
+    python setup_db.py
+
+Configuration is read from .env (git-ignored).  See .env.example for keys.
+DB_TYPE must be set to 'mysql' for this script to connect.
+"""
+
+import sys
+import pymysql
+import config
+import db
+
+
+# ---------------------------------------------------------------------------
+# Helper: raw PyMySQL connection (autocommit=True for DDL)
+# ---------------------------------------------------------------------------
+
+def _raw_conn():
+    """Open a raw PyMySQL connection to secure_banking with autocommit."""
+    return pymysql.connect(
+        host=config.DB_HOST,
+        port=config.DB_PORT,
+        user=config.DB_USER,
+        password=config.DB_PASSWORD,
+        database=config.DB_NAME,
+        autocommit=True,
+        charset="utf8mb4",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 1 -- Ensure the database exists
+# ---------------------------------------------------------------------------
+
+def ensure_database():
+    print(f"\n[1/6] Ensuring database '{config.DB_NAME}' exists ...")
+    admin = pymysql.connect(
+        host=config.DB_HOST,
+        port=config.DB_PORT,
+        user=config.DB_USER,
+        password=config.DB_PASSWORD,
+        autocommit=True,
+        charset="utf8mb4",
+    )
+    try:
+        with admin.cursor() as cur:
+            cur.execute(
+                f"CREATE DATABASE IF NOT EXISTS `{config.DB_NAME}` "
+                "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            )
+        print(f"    OK  Database `{config.DB_NAME}` is present.")
+    finally:
+        admin.close()
+
+
+# ---------------------------------------------------------------------------
+# Step 2 -- Create tables and seed demo data via db.init_db()
+# ---------------------------------------------------------------------------
+
+def init_schema():
+    print("\n[2/6] Running db.init_db() to create tables and seed demo data ...")
+    db.init_db()
+    print("    OK  All five tables created (IF NOT EXISTS) and demo data seeded.")
+
+
+# ---------------------------------------------------------------------------
+# Step 3 -- Column migration: add ip_address to Audit_Log if missing
+# ---------------------------------------------------------------------------
+
+def migrate_audit_log():
+    print("\n[3/6] Checking Audit_Log.ip_address column ...")
+    conn = _raw_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = 'Audit_Log' "
+                "  AND COLUMN_NAME = 'ip_address'",
+                (config.DB_NAME,),
+            )
+            if cur.fetchone()[0] == 0:
+                cur.execute(
+                    "ALTER TABLE Audit_Log ADD COLUMN ip_address VARCHAR(45) NULL"
+                )
+                print("    OK  ip_address column added to Audit_Log.")
+            else:
+                print("    OK  ip_address column already present (no action needed).")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Step 4 -- Stored procedures (from sql/procedures.sql logic)
+# ---------------------------------------------------------------------------
+
+def create_stored_procedures():
+    print("\n[4/6] Creating stored procedures: deposit, withdraw, transfer ...")
+    conn = _raw_conn()
+    try:
+        with conn.cursor() as cur:
+
+            # Drop existing versions
+            for name in ("deposit", "withdraw", "transfer"):
+                cur.execute(f"DROP PROCEDURE IF EXISTS `{name}`")
+
+            cur.execute("""
+            CREATE PROCEDURE deposit(IN acc_id INT, IN amt DECIMAL(15,2))
+            BEGIN
+                UPDATE Accounts SET balance = balance + amt WHERE account_id = acc_id;
+                INSERT INTO Transactions (from_account, to_account, amount, txn_type)
+                VALUES (NULL, acc_id, amt, 'deposit');
+            END
+            """)
+
+            cur.execute("""
+            CREATE PROCEDURE withdraw(IN acc_id INT, IN amt DECIMAL(15,2))
+            BEGIN
+                IF (SELECT balance FROM Accounts WHERE account_id = acc_id) >= amt THEN
+                    UPDATE Accounts SET balance = balance - amt WHERE account_id = acc_id;
+                    INSERT INTO Transactions (from_account, to_account, amount, txn_type)
+                    VALUES (acc_id, NULL, amt, 'withdraw');
+                ELSE
+                    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Insufficient balance';
+                END IF;
+            END
+            """)
+
+            cur.execute("""
+            CREATE PROCEDURE transfer(IN from_acc INT, IN to_acc INT, IN amt DECIMAL(15,2))
+            BEGIN
+                IF (SELECT balance FROM Accounts WHERE account_id = from_acc) >= amt THEN
+                    UPDATE Accounts SET balance = balance - amt WHERE account_id = from_acc;
+                    UPDATE Accounts SET balance = balance + amt WHERE account_id = to_acc;
+                    INSERT INTO Transactions (from_account, to_account, amount, txn_type)
+                    VALUES (from_acc, to_acc, amt, 'transfer');
+                ELSE
+                    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Insufficient balance';
+                END IF;
+            END
+            """)
+
+            cur.execute(
+                "SELECT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES "
+                "WHERE ROUTINE_SCHEMA = %s AND ROUTINE_TYPE = 'PROCEDURE'",
+                (config.DB_NAME,),
+            )
+            procs = [r[0] for r in cur.fetchall()]
+        print(f"    OK  Stored procedures: {procs}")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Step 5 -- Triggers (from sql/triggers.sql logic, corrected for MySQL 8)
+# ---------------------------------------------------------------------------
+
+def create_triggers():
+    print("\n[5/6] Creating triggers: after_failed_login, after_transaction, after_user_login ...")
+    conn = _raw_conn()
+    try:
+        with conn.cursor() as cur:
+
+            for name in ("after_failed_login", "after_transaction", "after_user_login"):
+                cur.execute(f"DROP TRIGGER IF EXISTS `{name}`")
+
+            # BEFORE UPDATE so we can SET NEW.is_locked without error 1442
+            cur.execute("""
+            CREATE TRIGGER after_failed_login
+            BEFORE UPDATE ON Users
+            FOR EACH ROW
+            BEGIN
+                IF NEW.failed_attempts >= 3 THEN
+                    SET NEW.is_locked = 1;
+                    INSERT INTO Alerts (user_id, alert_type, description, severity)
+                    VALUES (NEW.user_id, 'Brute Force',
+                            'Account locked after 3 failed login attempts', 'high');
+                END IF;
+            END
+            """)
+
+            # after_transaction: logs to Audit_Log + raises large-txn alert
+            cur.execute("""
+            CREATE TRIGGER after_transaction
+            AFTER INSERT ON Transactions
+            FOR EACH ROW
+            BEGIN
+                INSERT INTO Audit_Log (user_id, action, ip_address)
+                SELECT a.user_id,
+                       CONCAT('Transaction of ', NEW.amount, ' type: ', NEW.txn_type),
+                       '0.0.0.0'
+                FROM Accounts a
+                WHERE a.account_id = NEW.from_account;
+
+                IF NEW.amount > 50000 THEN
+                    INSERT INTO Alerts (user_id, alert_type, description, severity)
+                    SELECT a.user_id,
+                           'Large Transaction',
+                           CONCAT('Suspicious large transaction of ', NEW.amount),
+                           'high'
+                    FROM Accounts a
+                    WHERE a.account_id = NEW.from_account;
+                END IF;
+            END
+            """)
+
+            cur.execute("""
+            CREATE TRIGGER after_user_login
+            AFTER UPDATE ON Users
+            FOR EACH ROW
+            BEGIN
+                IF NEW.failed_attempts = 0 AND OLD.failed_attempts > 0 THEN
+                    INSERT INTO Audit_Log (user_id, action, ip_address)
+                    VALUES (NEW.user_id, 'Successful Login', '0.0.0.0');
+                END IF;
+            END
+            """)
+
+            cur.execute(
+                "SELECT TRIGGER_NAME FROM INFORMATION_SCHEMA.TRIGGERS "
+                "WHERE TRIGGER_SCHEMA = %s",
+                (config.DB_NAME,),
+            )
+            trigs = [r[0] for r in cur.fetchall()]
+        print(f"    OK  Triggers: {trigs}")
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Step 6 -- Verification: show tables and seeded data
+# ---------------------------------------------------------------------------
+
+def verify():
+    print("\n[6/6] Verification ...")
+    conn = _raw_conn()
+    try:
+        with conn.cursor() as cur:
+
+            cur.execute("SHOW TABLES")
+            tables = [r[0] for r in cur.fetchall()]
+            print(f"    Tables in `{config.DB_NAME}`: {tables}")
+
+            cur.execute(
+                "SELECT u.user_id, u.name, u.email, u.role, a.balance "
+                "FROM Users u JOIN Accounts a ON u.user_id = a.user_id "
+                "ORDER BY u.user_id"
+            )
+            rows = cur.fetchall()
+            print("    Seeded users & balances:")
+            for r in rows:
+                print(f"      user_id={r[0]}  {r[1]:<20} {r[2]:<30} role={r[3]}  "
+                      f"balance=Rs {float(r[4]):,.2f}")
+
+            cur.execute(
+                "SELECT ROUTINE_NAME FROM INFORMATION_SCHEMA.ROUTINES "
+                "WHERE ROUTINE_SCHEMA = %s AND ROUTINE_TYPE = 'PROCEDURE'",
+                (config.DB_NAME,),
+            )
+            procs = [r[0] for r in cur.fetchall()]
+            print(f"    Stored procedures: {procs}")
+
+            cur.execute(
+                "SELECT TRIGGER_NAME FROM INFORMATION_SCHEMA.TRIGGERS "
+                "WHERE TRIGGER_SCHEMA = %s",
+                (config.DB_NAME,),
+            )
+            trigs = [r[0] for r in cur.fetchall()]
+            print(f"    Triggers: {trigs}")
+
+    finally:
+        conn.close()
+
+    # Also confirm db.get_connection() returns MySQL
+    conn2 = db.get_connection()
+    engine = "MySQL" if db.is_mysql_connection(conn2) else "SQLite"
+    conn2.close()
+    print(f"\n    db.get_connection() engine: {engine}")
+    if engine != "MySQL":
+        print("    WARNING: application is NOT using MySQL -- check your .env DB_TYPE value.")
+        sys.exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    if config.DB_TYPE != "mysql":
+        print(
+            f"ERROR: DB_TYPE is '{config.DB_TYPE}' in your .env.\n"
+            "       Set DB_TYPE=mysql and fill in DB_PASSWORD before running this script."
+        )
+        sys.exit(1)
+
+    print("=" * 60)
+    print("  Secure Banking System -- MySQL Database Setup")
+    print(f"  Host: {config.DB_HOST}:{config.DB_PORT}  DB: {config.DB_NAME}")
+    print("=" * 60)
+
+    try:
+        ensure_database()
+        init_schema()
+        migrate_audit_log()
+        create_stored_procedures()
+        create_triggers()
+        verify()
+        print("\n" + "=" * 60)
+        print("  Setup complete! MySQL database is ready.")
+        print("=" * 60)
+    except Exception as exc:
+        print(f"\nERROR: {exc}")
+        sys.exit(1)
