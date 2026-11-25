@@ -12,9 +12,11 @@ Each test IS a documented control test:
 Run: pytest tests/test_database.py -v
 """
 
+import secrets
 import sqlite3
-import hashlib
 import pytest
+
+from bank import auth
 
 # ---------------------------------------------------------------------------
 # Fixtures -- build an isolated in-memory database for each test
@@ -84,17 +86,16 @@ def mem_conn():
         );
     """)
 
-    # Seed two users and two accounts.
-    def _hash(pw):
-        return hashlib.sha256(pw.encode()).hexdigest()
+    # Seed two users and two accounts using bcrypt hashes.
+    pw_hash = auth.hash_password(secrets.token_urlsafe(16))
 
     conn.execute(
         "INSERT INTO Users (name, email, password_hash, role) VALUES (?,?,?,?)",
-        ("Admin User", "admin@bank.com", _hash("admin123"), "admin"),
+        ("Admin User", "admin@bank.com", pw_hash, "admin"),
     )
     conn.execute(
         "INSERT INTO Users (name, email, password_hash, role) VALUES (?,?,?,?)",
-        ("Normal User", "user@bank.com", _hash("user123"), "user"),
+        ("Normal User", "user@bank.com", pw_hash, "user"),
     )
     conn.execute("INSERT INTO Accounts (user_id, balance) VALUES (1, 10000.00)")
     conn.execute("INSERT INTO Accounts (user_id, balance) VALUES (2, 5000.00)")

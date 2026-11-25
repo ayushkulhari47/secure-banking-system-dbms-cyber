@@ -295,7 +295,7 @@ class TestBcryptHashing:
     """
     Vulnerability fixed: unsalted SHA-256 is vulnerable to rainbow tables.
 
-    Original: hashlib.sha256("ayush123".encode()).hexdigest() -- same output
+    Original: hashlib.sha256(pw.encode()).hexdigest() -- same output
     every time for the same input, precomputable.
 
     Fixed: bcrypt with work factor 12 -- unique salt per hash, adaptive cost.
@@ -337,9 +337,9 @@ class TestBcryptHashing:
         This confirms the upgrade path is not backward-compatible -- which
         is why we deleted banking.db and re-seeded.
         """
-        sha256_hash = hashlib.sha256("ayush123".encode()).hexdigest()
+        sha256_hash = hashlib.sha256(b"legacy-digest-sample").hexdigest()
         # verify_password must fail closed, not crash.
-        result = auth.verify_password("ayush123", sha256_hash)
+        result = auth.verify_password("legacy-digest-sample", sha256_hash)
         assert result is False
 
     def test_malformed_hash_fails_safely(self):

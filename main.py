@@ -38,53 +38,13 @@ def login() -> tuple:
     email = input("Email: ").strip()
     password = getpass.getpass("Password: ")
 
-    if security.detect_sqli(email):
-        audit.log_action(None, "SQL injection pattern detected during login")
-        alerts.raise_alert(
-            None,
-            "SQL Injection Signal",
-            "Suspicious login input pattern detected",
-            severity="high",
-        )
-
-    user = auth.get_user_by_email(email)
-
+    user, error_message = auth.authenticate(email, password)
     if user is None:
-        # Run a dummy bcrypt check so unknown-email and wrong-password paths
-        # have comparable work, and never disclose whether an email exists.
-        auth.verify_password(password, auth.DUMMY_PASSWORD_HASH)
-        audit.log_action(None, "Failed login -- invalid credentials")
-        print("Invalid email or password.")
+        print(error_message)
         return None, None
 
-    if user["is_locked"]:
-        audit.log_action(user["user_id"], "Login attempt on locked account")
-        print("Account is locked due to multiple failed attempts. Contact admin.")
-        return None, None
-
-    if auth.verify_password(password, user["password_hash"]):
-        auth.reset_failed_attempts(user["user_id"])
-        audit.log_action(user["user_id"], "Successful login")
-        print(f"\nWelcome {user['name']}!  Role: {user['role']}")
-        return user["user_id"], user["role"]
-
-    # Wrong password path.
-    auth.increment_failed_attempts(user["user_id"], max_attempts=MAX_FAILED_LOGINS)
-    attempts_now = auth.get_failed_attempts(user["user_id"])
-    audit.log_action(user["user_id"], f"Failed login attempt #{attempts_now}")
-
-    if attempts_now >= MAX_FAILED_LOGINS:
-        alerts.raise_alert(
-            user["user_id"],
-            "Brute Force",
-            f"Account locked after {attempts_now} failed attempts",
-            severity="high",
-        )
-        print("Too many failed attempts -- your account is now locked.")
-    else:
-        print(f"Wrong password! Attempt {attempts_now}/{MAX_FAILED_LOGINS}")
-
-    return None, None
+    print(f"\nWelcome {user['name']}!  Role: {user['role']}")
+    return user["user_id"], user["role"]
 
 
 def _record_transaction_signals(user_id: int, action: str) -> None:

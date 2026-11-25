@@ -13,7 +13,7 @@ import sys
 # Ensure repository root is on sys.path when invoked as `python scripts/seed_demo.py`.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from bank import auth, db
+from bank import auth, db, security
 
 DEMO_ACCOUNTS = [
     {
@@ -50,6 +50,12 @@ def _resolve_password(spec: dict) -> str:
         raise ValueError(
             f"Password for {spec['email']} cannot be empty "
             f"(set {spec['env_var']} or enter it interactively)."
+        )
+    ok, violations = security.password_meets_policy(password)
+    if not ok:
+        raise ValueError(
+            f"Password for {spec['email']} does not meet policy: "
+            + "; ".join(violations)
         )
     return password
 
