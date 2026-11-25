@@ -12,23 +12,32 @@ def raise_alert(
     alert_type: str,
     description: str,
     severity: str = "medium",
-) -> None:
-    """Insert a security alert and commit it before returning."""
-    conn = db.get_connection()
-    try:
-        conn.execute("BEGIN")
+    conn=None,
+):
+    """Insert a security alert, using `conn` when provided or its own transaction."""
+    if conn is not None:
         cursor = conn.execute(
             "INSERT INTO Alerts (user_id, alert_type, description, severity)"
             " VALUES (?, ?, ?, ?)",
             (user_id, alert_type, description, severity),
         )
-        conn.execute("COMMIT")
+        return cursor.lastrowid
+
+    own_conn = db.get_connection()
+    try:
+        db.begin_write_transaction(own_conn)
+        cursor = own_conn.execute(
+            "INSERT INTO Alerts (user_id, alert_type, description, severity)"
+            " VALUES (?, ?, ?, ?)",
+            (user_id, alert_type, description, severity),
+        )
+        own_conn.execute("COMMIT")
         return cursor.lastrowid
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(own_conn)
         raise
     finally:
-        conn.close()
+        own_conn.close()
 
 
 def review_alert(alert_id: int, admin_user_id: int, note: str = "") -> bool:

@@ -118,13 +118,6 @@ def do_withdraw(user_id: int, session: Session) -> None:
     success = transactions.withdraw(acc["account_id"], amount, actor_user_id=user_id)
     if success:
         _record_transaction_signals(user_id, "Withdrawal")
-        if amount > LARGE_TXN_THRESHOLD:
-            alerts.raise_alert(
-                user_id,
-                "Large Transaction",
-                f"Large withdrawal of Rs{amount:.2f} detected",
-                severity="high",
-            )
         updated = transactions.get_account_by_user(user_id)
         print(f"Rs{amount:.2f} withdrawn!  New balance: Rs{updated['balance']:.2f}")
     else:
@@ -176,13 +169,6 @@ def do_transfer(user_id: int, session: Session) -> None:
             audit.log_action(user_id, f"Rejected pending transfer attempt -- {exc}")
             session.refresh()
             return
-        alerts.raise_alert(
-            user_id,
-            "Large Transaction Pending Approval",
-            f"Transfer #{txn_id} of Rs{amount:.2f} to account {to_acc_id} "
-            "queued for Maker-Checker dual control",
-            severity="high",
-        )
         _record_transaction_signals(user_id, "Pending transfer")
         print("\n  [!] Large Transaction Notice (Maker-Checker Control):")
         print(

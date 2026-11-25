@@ -47,31 +47,56 @@ def verify_password(plaintext: str, stored_hash: str) -> bool:
 
 
 def increment_failed_attempts(
-    user_id: int, max_attempts: int = MAX_FAILED_LOGINS
-) -> None:
+    user_id: int, max_attempts: int = MAX_FAILED_LOGINS, conn=None
+) -> int:
     """
-    Increment failed_attempts and lock the account if the threshold is reached.
-    Both UPDATEs are atomic inside one transaction.
+    Atomically increment failed_attempts, lock the account when reaching
+    max_attempts, and raise one high-severity Brute Force alert on lockout.
+    Returns the updated failed_attempts count.
     """
-    conn = db.get_connection()
-    try:
-        conn.execute("BEGIN")
-        conn.execute(
-            "UPDATE Users SET failed_attempts = failed_attempts + 1"
-            " WHERE user_id = ?",
+
+    def _apply(active_conn) -> int:
+        lock_clause = " FOR UPDATE" if db.is_mysql_connection(active_conn) else ""
+        row = active_conn.execute(
+            "SELECT failed_attempts, is_locked FROM Users WHERE user_id = ?"
+            + lock_clause,
             (user_id,),
+        ).fetchone()
+        if row is None:
+            return 0
+
+        was_locked = bool(row["is_locked"])
+        new_attempts = int(row["failed_attempts"]) + 1
+        now_locked = was_locked or (new_attempts >= max_attempts)
+
+        active_conn.execute(
+            "UPDATE Users SET failed_attempts = ?, is_locked = ? WHERE user_id = ?",
+            (new_attempts, 1 if now_locked else 0, user_id),
         )
-        conn.execute(
-            "UPDATE Users SET is_locked = 1"
-            " WHERE user_id = ? AND failed_attempts >= ?",
-            (user_id, max_attempts),
-        )
-        conn.execute("COMMIT")
+        if not was_locked and now_locked:
+            alerts.raise_alert(
+                user_id,
+                "Brute Force",
+                f"Account locked after {new_attempts} failed attempts",
+                severity="high",
+                conn=active_conn,
+            )
+        return new_attempts
+
+    if conn is not None:
+        return _apply(conn)
+
+    own_conn = db.get_connection()
+    try:
+        db.begin_write_transaction(own_conn)
+        attempts = _apply(own_conn)
+        own_conn.execute("COMMIT")
+        return attempts
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(own_conn)
         raise
     finally:
-        conn.close()
+        own_conn.close()
 
 
 def reset_failed_attempts(user_id: int) -> None:
@@ -137,17 +162,21 @@ def authenticate(email: str, password: str) -> tuple:
         audit.log_action(user["user_id"], "Successful login")
         return user, None
 
-    increment_failed_attempts(user["user_id"], max_attempts=MAX_FAILED_LOGINS)
-    attempts_now = get_failed_attempts(user["user_id"])
-    audit.log_action(user["user_id"], f"Failed login attempt #{attempts_now}")
-
-    if attempts_now >= MAX_FAILED_LOGINS:
-        alerts.raise_alert(
-            user["user_id"],
-            "Brute Force",
-            f"Account locked after {attempts_now} failed attempts",
-            severity="high",
+    conn = db.get_connection()
+    try:
+        db.begin_write_transaction(conn)
+        attempts_now = increment_failed_attempts(
+            user["user_id"], max_attempts=MAX_FAILED_LOGINS, conn=conn
         )
+        audit.log_action(
+            user["user_id"], f"Failed login attempt #{attempts_now}", conn=conn
+        )
+        conn.execute("COMMIT")
+    except Exception:
+        db.safe_rollback(conn)
+        raise
+    finally:
+        conn.close()
 
     return None, GENERIC_LOGIN_ERROR
 

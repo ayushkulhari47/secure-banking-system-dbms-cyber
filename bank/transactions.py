@@ -4,7 +4,21 @@ bank/transactions.py -- Account lookups, ACID banking transactions, and Maker-Ch
 
 from decimal import Decimal
 
-from bank import audit, db, security
+from bank import alerts, audit, config, db, security
+
+
+def _maybe_raise_large_txn_alert(
+    conn, user_id: int, description: str, amount: Decimal
+) -> None:
+    """Raise a high-severity Large Transaction alert inside `conn` when above threshold."""
+    if amount > config.LARGE_TXN_THRESHOLD:
+        alerts.raise_alert(
+            user_id,
+            "Large Transaction",
+            description,
+            severity="high",
+            conn=conn,
+        )
 
 
 def _require_account_owner(conn, account_id: int, actor_user_id: int, lock_clause: str = ""):
@@ -140,6 +154,12 @@ def deposit(account_id: int, amount, actor_user_id: int = None) -> None:
             " VALUES (NULL, ?, ?, 'deposit')",
             (account_id, str(amt)),
         )
+        _maybe_raise_large_txn_alert(
+            conn,
+            actor_user_id,
+            f"Large deposit of Rs{amt:.2f} on account #{account_id}",
+            amt,
+        )
         conn.execute("COMMIT")
     except Exception:
         db.safe_rollback(conn)
@@ -183,6 +203,12 @@ def withdraw(account_id: int, amount, actor_user_id: int = None) -> bool:
             "INSERT INTO Transactions (from_account, to_account, amount, txn_type)"
             " VALUES (?, NULL, ?, 'withdraw')",
             (account_id, str(amt)),
+        )
+        _maybe_raise_large_txn_alert(
+            conn,
+            actor_user_id,
+            f"Large withdrawal of Rs{amt:.2f} on account #{account_id}",
+            amt,
         )
         conn.execute("COMMIT")
         return True
@@ -255,6 +281,12 @@ def transfer(
             "INSERT INTO Transactions (from_account, to_account, amount, txn_type)"
             " VALUES (?, ?, ?, 'transfer')",
             (from_account_id, to_account_id, str(amt)),
+        )
+        _maybe_raise_large_txn_alert(
+            conn,
+            actor_user_id,
+            f"Large transfer of Rs{amt:.2f} to account #{to_account_id}",
+            amt,
         )
         conn.execute("COMMIT")
         return True
@@ -353,6 +385,13 @@ def create_pending_transfer(
             f"Initiated transfer #{txn_id} of Rs{amt:.2f} to account {to_account_id} "
             "(pending Maker-Checker approval)",
             conn=conn,
+        )
+        _maybe_raise_large_txn_alert(
+            conn,
+            actor_user_id,
+            f"Large transfer #{txn_id} of Rs{amt:.2f} to account #{to_account_id} "
+            "pending Maker-Checker approval",
+            amt,
         )
         conn.execute("COMMIT")
         return txn_id
