@@ -281,14 +281,19 @@ class TestMakerCheckerWorkflow:
         assert txn["status"] == "rejected"
 
     def test_insufficient_funds_at_approval_time_rejects(self, test_db):
-        """If the maker spends funds before checker approves, approval fails safely."""
+        """Pending funds are reserved from withdrawal, and low balance at approval rejects safely."""
         # Rahul has 25000
         txn_id = transactions.create_pending_transfer(
             from_account_id=2, to_account_id=3, amount=20000.00, actor_user_id=2
         )
 
-        # Rahul withdraws 10000, leaving only 15000 in balance
-        assert transactions.withdraw(2, 10000.00, actor_user_id=2) is True
+        # Pending 20000 reserves funds so withdrawing 10000 from 25000 is blocked
+        assert transactions.withdraw(2, 10000.00, actor_user_id=2) is False
+
+        # Simulate balance falling below pending amount before approval
+        conn = db.get_connection()
+        conn.execute("UPDATE Accounts SET balance = '15000.00' WHERE account_id = 2")
+        conn.close()
 
         # Admin tries to approve the 20000 transfer
         success, message = transactions.approve_pending_transfer(
@@ -298,7 +303,7 @@ class TestMakerCheckerWorkflow:
         assert "insufficient" in message.lower()
 
         # Balance remains 15000 (not negative)
-        assert transactions.get_account_by_id(2, actor_user_id=2)["balance"] == 15000.00
+        assert transactions.get_account_by_id(2, actor_user_id=2)["balance"] == Decimal("15000.00")
 
 
 # ===========================================================================

@@ -64,11 +64,16 @@ class MySQLConnectionWrapper:
     def __init__(self, raw_conn):
         self._conn = raw_conn
 
+    @property
+    def in_transaction(self) -> bool:
+        """Return True when a MySQL transaction is currently active."""
+        return bool(self._conn.in_transaction)
+
     def execute(self, sql: str, params=()):
         sql_clean = sql.strip()
         upper_sql = sql_clean.upper()
 
-        if upper_sql == "BEGIN":
+        if upper_sql in {"BEGIN", "BEGIN IMMEDIATE"}:
             if not self._conn.in_transaction:
                 self._conn.start_transaction()
             return None
@@ -144,6 +149,23 @@ def get_connection():
 def is_mysql_connection(conn) -> bool:
     """Return True if conn wraps a MySQL connection."""
     return isinstance(conn, MySQLConnectionWrapper)
+
+
+def begin_write_transaction(conn) -> None:
+    """Start an immediate/locked write transaction for the active database engine."""
+    if is_mysql_connection(conn):
+        conn.execute("BEGIN")
+    else:
+        conn.execute("BEGIN IMMEDIATE")
+
+
+def safe_rollback(conn) -> None:
+    """Roll back an active transaction safely without raising if none is active."""
+    try:
+        if getattr(conn, "in_transaction", True):
+            conn.execute("ROLLBACK")
+    except Exception:
+        pass
 
 
 def _is_admin(conn, user_id: int) -> bool:

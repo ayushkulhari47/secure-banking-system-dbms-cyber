@@ -19,6 +19,29 @@ def _require_account_owner(conn, account_id: int, actor_user_id: int, lock_claus
     return account
 
 
+def _pending_outgoing_total(
+    conn, account_id: int, exclude_txn_id: int = None, lock_clause: str = ""
+) -> Decimal:
+    """Sum pending outgoing transfer amounts for account_id using Decimal."""
+    if exclude_txn_id is None:
+        rows = conn.execute(
+            "SELECT amount FROM Transactions "
+            "WHERE from_account = ? AND status = 'pending'" + lock_clause,
+            (account_id,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT amount FROM Transactions "
+            "WHERE from_account = ? AND status = 'pending' AND txn_id != ?"
+            + lock_clause,
+            (account_id, exclude_txn_id),
+        ).fetchall()
+    return sum(
+        (security.db_to_decimal(r["amount"]) for r in rows),
+        Decimal("0.00"),
+    )
+
+
 def _normalize_account_row(row):
     """Convert an Accounts DB row into a dict with Decimal balance."""
     if row is None:
@@ -99,7 +122,7 @@ def deposit(account_id: int, amount, actor_user_id: int = None) -> None:
     amt = _validated_decimal_amount(amount)
     conn = db.get_connection()
     try:
-        conn.execute("BEGIN")
+        db.begin_write_transaction(conn)
         lock_clause = " FOR UPDATE" if db.is_mysql_connection(conn) else ""
         account = _require_account_owner(
             conn, account_id, actor_user_id, lock_clause=lock_clause
@@ -119,7 +142,7 @@ def deposit(account_id: int, amount, actor_user_id: int = None) -> None:
         )
         conn.execute("COMMIT")
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(conn)
         raise
     finally:
         conn.close()
@@ -128,25 +151,28 @@ def deposit(account_id: int, amount, actor_user_id: int = None) -> None:
 def withdraw(account_id: int, amount, actor_user_id: int = None) -> bool:
     """
     Debit 'amount' from 'account_id' atomically using Decimal math.
-    Requires actor_user_id to own the target account.
-    Returns True on success, False if balance is insufficient.
+    Respects pending outgoing transfer reserves and requires actor_user_id ownership.
+    Returns True on success, False if available balance is insufficient.
     """
     if actor_user_id is None:
         raise PermissionError("Authentication required.")
     amt = _validated_decimal_amount(amount)
     conn = db.get_connection()
     try:
-        conn.execute("BEGIN")
+        db.begin_write_transaction(conn)
         lock_clause = " FOR UPDATE" if db.is_mysql_connection(conn) else ""
         row = _require_account_owner(
             conn, account_id, actor_user_id, lock_clause=lock_clause
         )
         if row is None:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False
         current_balance = security.db_to_decimal(row["balance"])
-        if current_balance < amt:
-            conn.execute("ROLLBACK")
+        pending_total = _pending_outgoing_total(
+            conn, account_id, lock_clause=lock_clause
+        )
+        if current_balance - pending_total < amt:
+            db.safe_rollback(conn)
             return False
         new_balance = current_balance - amt
         conn.execute(
@@ -161,7 +187,7 @@ def withdraw(account_id: int, amount, actor_user_id: int = None) -> bool:
         conn.execute("COMMIT")
         return True
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(conn)
         raise
     finally:
         conn.close()
@@ -175,34 +201,46 @@ def transfer(
 ) -> bool:
     """
     Move 'amount' from one account to another atomically using Decimal math.
-    Requires actor_user_id to own from_account_id.
-    Returns True on success, False if balance is insufficient or accounts are invalid.
+    Locks accounts in deterministic order on MySQL and uses BEGIN IMMEDIATE on SQLite.
+    Respects pending outgoing transfer reserves and requires actor_user_id ownership.
     """
     if actor_user_id is None:
         raise PermissionError("Authentication required.")
     conn = db.get_connection()
     try:
-        conn.execute("BEGIN")
+        db.begin_write_transaction(conn)
         lock_clause = " FOR UPDATE" if db.is_mysql_connection(conn) else ""
-        row = _require_account_owner(
-            conn, from_account_id, actor_user_id, lock_clause=lock_clause
-        )
         if from_account_id == to_account_id:
-            conn.execute("ROLLBACK")
+            _require_account_owner(
+                conn, from_account_id, actor_user_id, lock_clause=lock_clause
+            )
+            db.safe_rollback(conn)
             return False
         amt = _validated_decimal_amount(amount)
-        destination = conn.execute(
-            "SELECT account_id, balance FROM Accounts WHERE account_id = ?" + lock_clause,
-            (to_account_id,),
-        ).fetchone()
+
+        locked_rows = conn.execute(
+            "SELECT account_id, user_id, balance FROM Accounts "
+            "WHERE account_id IN (?, ?) ORDER BY account_id ASC" + lock_clause,
+            (from_account_id, to_account_id),
+        ).fetchall()
+        accounts_by_id = {r["account_id"]: r for r in locked_rows}
+        row = accounts_by_id.get(from_account_id)
+        if row is not None and row["user_id"] != actor_user_id:
+            raise PermissionError("Access denied: account belongs to another user.")
+        destination = accounts_by_id.get(to_account_id)
         if row is None or destination is None:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False
+
         from_balance = security.db_to_decimal(row["balance"])
         to_balance = security.db_to_decimal(destination["balance"])
-        if from_balance < amt:
-            conn.execute("ROLLBACK")
+        pending_total = _pending_outgoing_total(
+            conn, from_account_id, lock_clause=lock_clause
+        )
+        if from_balance - pending_total < amt:
+            db.safe_rollback(conn)
             return False
+
         new_from_balance = from_balance - amt
         new_to_balance = to_balance + amt
         conn.execute(
@@ -221,7 +259,7 @@ def transfer(
         conn.execute("COMMIT")
         return True
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(conn)
         raise
     finally:
         conn.close()
@@ -282,7 +320,7 @@ def create_pending_transfer(
         raise PermissionError("Authentication required.")
     conn = db.get_connection()
     try:
-        conn.execute("BEGIN")
+        db.begin_write_transaction(conn)
         lock_clause = " FOR UPDATE" if db.is_mysql_connection(conn) else ""
         source = _require_account_owner(
             conn, from_account_id, actor_user_id, lock_clause=lock_clause
@@ -293,20 +331,14 @@ def create_pending_transfer(
             )
         amt = _validated_decimal_amount(amount)
         destination = conn.execute(
-            "SELECT account_id FROM Accounts WHERE account_id = ?",
+            "SELECT account_id FROM Accounts WHERE account_id = ?" + lock_clause,
             (to_account_id,),
         ).fetchone()
         if source is None or destination is None:
             raise ValueError("Both transfer accounts must exist.")
         source_balance = security.db_to_decimal(source["balance"])
-        pending_rows = conn.execute(
-            "SELECT amount FROM Transactions "
-            "WHERE from_account = ? AND status = 'pending'",
-            (from_account_id,),
-        ).fetchall()
-        pending_total = sum(
-            (security.db_to_decimal(r["amount"]) for r in pending_rows),
-            Decimal("0.00"),
+        pending_total = _pending_outgoing_total(
+            conn, from_account_id, lock_clause=lock_clause
         )
         if source_balance - pending_total < amt:
             raise ValueError("Insufficient available balance for pending transfers.")
@@ -319,7 +351,7 @@ def create_pending_transfer(
         conn.execute("COMMIT")
         return txn_id
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(conn)
         raise
     finally:
         conn.close()
@@ -346,16 +378,14 @@ def get_pending_transfers(admin_user_id: int = None) -> list:
 
 def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
     """
-    Checker approves a pending transfer using Decimal math, enforcing Segregation of Duties:
-      - approver must be an admin
-      - approver cannot be the original maker (from_acc owner)
-      - approver cannot be the recipient (to_acc owner)
+    Checker approves a pending transfer atomically using Decimal math and row locks.
+    Enforces Segregation of Duties (non-admin, maker, and recipient rejected).
     """
     conn = db.get_connection()
     try:
-        conn.execute("BEGIN")
+        db.begin_write_transaction(conn)
         if not db._is_admin(conn, approver_user_id):
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return (
                 False,
                 "Only administrators may approve transfers (Segregation of Duties).",
@@ -367,24 +397,24 @@ def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
             (txn_id,),
         ).fetchone()
         if not txn:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False, "Pending transaction not found."
 
-        from_acc = conn.execute(
-            "SELECT * FROM Accounts WHERE account_id = ?" + lock_clause,
-            (txn["from_account"],),
-        ).fetchone()
-        to_acc = conn.execute(
-            "SELECT * FROM Accounts WHERE account_id = ?" + lock_clause,
-            (txn["to_account"],),
-        ).fetchone()
+        locked_rows = conn.execute(
+            "SELECT * FROM Accounts WHERE account_id IN (?, ?) ORDER BY account_id ASC"
+            + lock_clause,
+            (txn["from_account"], txn["to_account"]),
+        ).fetchall()
+        accounts_by_id = {r["account_id"]: r for r in locked_rows}
+        from_acc = accounts_by_id.get(txn["from_account"])
+        to_acc = accounts_by_id.get(txn["to_account"])
 
         if not from_acc or not to_acc:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False, "Associated accounts not found."
 
         if from_acc["user_id"] == approver_user_id:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             audit.log_action(
                 approver_user_id,
                 f"SoD violation attempt: self-approval of txn #{txn_id}",
@@ -395,7 +425,7 @@ def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
             )
 
         if to_acc["user_id"] == approver_user_id:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             audit.log_action(
                 approver_user_id,
                 f"SoD violation attempt: recipient approval of txn #{txn_id}",
@@ -408,8 +438,14 @@ def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
         txn_amount = security.db_to_decimal(txn["amount"])
         from_balance = security.db_to_decimal(from_acc["balance"])
         to_balance = security.db_to_decimal(to_acc["balance"])
+        other_pending = _pending_outgoing_total(
+            conn,
+            from_acc["account_id"],
+            exclude_txn_id=txn_id,
+            lock_clause=lock_clause,
+        )
 
-        if from_balance < txn_amount:
+        if from_balance - other_pending < txn_amount:
             conn.execute(
                 "UPDATE Transactions SET status = 'rejected' WHERE txn_id = ?",
                 (txn_id,),
@@ -442,7 +478,7 @@ def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
         )
         return True, "Transfer approved and processed successfully."
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(conn)
         raise
     finally:
         conn.close()
@@ -454,9 +490,9 @@ def reject_pending_transfer(
     """Checker rejects a pending transfer."""
     conn = db.get_connection()
     try:
-        conn.execute("BEGIN")
+        db.begin_write_transaction(conn)
         if not db._is_admin(conn, approver_user_id):
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False, "Only administrators may reject transfers."
         lock_clause = " FOR UPDATE" if db.is_mysql_connection(conn) else ""
         txn = conn.execute(
@@ -465,7 +501,7 @@ def reject_pending_transfer(
             (txn_id,),
         ).fetchone()
         if not txn:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False, "Pending transaction not found."
 
         conn.execute(
@@ -478,7 +514,7 @@ def reject_pending_transfer(
         )
         return True, "Transfer rejected successfully."
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(conn)
         raise
     finally:
         conn.close()
