@@ -91,7 +91,7 @@ def do_deposit(user_id: int, session: Session) -> None:
         audit.log_action(user_id, f"Rejected deposit attempt -- {reason}")
         return
 
-    transactions.deposit(acc["account_id"], amount)
+    transactions.deposit(acc["account_id"], amount, actor_user_id=user_id)
     audit.log_action(user_id, f"Deposited Rs{amount:.2f}")
     _record_transaction_signals(user_id, "Deposit")
     updated = transactions.get_account_by_user(user_id)
@@ -116,7 +116,7 @@ def do_withdraw(user_id: int, session: Session) -> None:
         audit.log_action(user_id, f"Rejected withdrawal attempt -- {reason}")
         return
 
-    success = transactions.withdraw(acc["account_id"], amount)
+    success = transactions.withdraw(acc["account_id"], amount, actor_user_id=user_id)
     if success:
         audit.log_action(user_id, f"Withdrew Rs{amount:.2f}")
         _record_transaction_signals(user_id, "Withdrawal")
@@ -153,8 +153,7 @@ def do_transfer(user_id: int, session: Session) -> None:
         )
         return
 
-    dest = transactions.get_account_by_id(to_acc_id)
-    if dest is None:
+    if not transactions.account_exists(to_acc_id):
         print("Destination account not found!")
         return
 
@@ -172,7 +171,7 @@ def do_transfer(user_id: int, session: Session) -> None:
     if amount > LARGE_TXN_THRESHOLD:
         try:
             txn_id = transactions.create_pending_transfer(
-                acc["account_id"], to_acc_id, amount
+                acc["account_id"], to_acc_id, amount, actor_user_id=user_id
             )
         except ValueError as exc:
             print(f"  [!] Transfer not submitted: {exc}")
@@ -205,7 +204,9 @@ def do_transfer(user_id: int, session: Session) -> None:
         session.refresh()
         return
 
-    success = transactions.transfer(acc["account_id"], to_acc_id, amount)
+    success = transactions.transfer(
+        acc["account_id"], to_acc_id, amount, actor_user_id=user_id
+    )
     if success:
         audit.log_action(user_id, f"Transferred Rs{amount:.2f} to account {to_acc_id}")
         _record_transaction_signals(user_id, "Transfer")
@@ -241,7 +242,9 @@ def view_transactions(user_id: int, role: str, session: Session) -> None:
         if acc is None:
             print("No account found.")
             return
-        rows = transactions.get_transactions_for_account(acc["account_id"])
+        rows = transactions.get_transactions_for_account(
+            acc["account_id"], actor_user_id=user_id
+        )
 
     if not rows:
         print("No transactions found.")
@@ -314,7 +317,7 @@ def do_change_password(user_id: int, session: Session) -> None:
         print("  [!] New passwords do not match. Password not changed.")
         return
 
-    ok, reason = auth.change_password(user_id, old_pw, new_pw)
+    ok, reason = auth.change_password(user_id, old_pw, new_pw, actor_user_id=user_id)
     if ok:
         print("  [+] Password changed successfully.")
         session.refresh()
@@ -387,7 +390,7 @@ def manage_locked_users(user_id: int, role: str, session: Session) -> None:
         return
 
     print("\n--- Locked User Accounts ---")
-    rows = auth.get_locked_users()
+    rows = auth.get_locked_users(admin_user_id=user_id)
     if not rows:
         print("No accounts are currently locked.")
         session.refresh()
@@ -468,7 +471,7 @@ def verify_audit_integrity_menu(user_id: int, role: str, session: Session) -> No
         return
 
     print("\n--- Audit Log Cryptographic Integrity Verification ---")
-    is_valid, bad_id = audit.verify_audit_log_integrity()
+    is_valid, bad_id = audit.verify_audit_log_integrity(admin_user_id=user_id)
     if is_valid:
         print("  [+] INTEGRITY PASS: All cryptographic SHA-256 hash chains match.")
         print("      No records have been modified, deleted, or inserted out of order.")

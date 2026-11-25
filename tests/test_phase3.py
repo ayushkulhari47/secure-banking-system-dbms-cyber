@@ -84,7 +84,9 @@ class TestChangePassword:
         conn.close()
 
         user = auth.get_user_by_email("changeme@test.com")
-        ok, err = auth.change_password(user["user_id"], "OldPass1!", "NewPass2@")
+        ok, err = auth.change_password(
+            user["user_id"], "OldPass1!", "NewPass2@", actor_user_id=user["user_id"]
+        )
         assert ok is True
         assert err is None
 
@@ -95,14 +97,18 @@ class TestChangePassword:
     def test_wrong_old_password_rejected(self, test_db):
         """Wrong current password must be rejected."""
         user = auth.get_user_by_email("rahul@bank.com")
-        ok, err = auth.change_password(user["user_id"], "wrongpassword", "NewPass2@")
+        ok, err = auth.change_password(
+            user["user_id"], "wrongpassword", "NewPass2@", actor_user_id=user["user_id"]
+        )
         assert ok is False
         assert "incorrect" in err.lower()
 
     def test_weak_new_password_rejected(self, test_db):
         """New password that fails policy must be rejected."""
         user = auth.get_user_by_email("rahul@bank.com")
-        ok, err = auth.change_password(user["user_id"], "OldPass1!", "weak")
+        ok, err = auth.change_password(
+            user["user_id"], "OldPass1!", "weak", actor_user_id=user["user_id"]
+        )
         assert ok is False
         assert "policy" in err.lower() or "password" in err.lower()
 
@@ -116,13 +122,17 @@ class TestChangePassword:
         conn.close()
 
         user = auth.get_user_by_email("priya@bank.com")
-        ok, err = auth.change_password(user["user_id"], "SamePass1!", "SamePass1!")
+        ok, err = auth.change_password(
+            user["user_id"], "SamePass1!", "SamePass1!", actor_user_id=user["user_id"]
+        )
         assert ok is False
         assert "different" in err.lower()
 
     def test_nonexistent_user_rejected(self, test_db):
         """Non-existent user_id must be handled gracefully."""
-        ok, err = auth.change_password(9999, "anything", "NewPass2@")
+        ok, err = auth.change_password(
+            9999, "anything", "NewPass2@", actor_user_id=9999
+        )
         assert ok is False
         assert "not found" in err.lower()
 
@@ -136,7 +146,9 @@ class TestChangePassword:
         conn.close()
 
         user = auth.get_user_by_email("ayush@bank.com")
-        auth.change_password(user["user_id"], "OldPass1!", "NewStrong2@")
+        auth.change_password(
+            user["user_id"], "OldPass1!", "NewStrong2@", actor_user_id=user["user_id"]
+        )
 
         updated = auth.get_user_by_email("ayush@bank.com")
         assert not bcrypt.checkpw(b"OldPass1!", updated["password_hash"].encode())
@@ -348,7 +360,9 @@ class TestTransferAtomic:
         total_before = acc1["balance"] + acc2["balance"]
 
         amount = 100.00
-        ok = transactions.transfer(acc1["account_id"], acc2["account_id"], amount)
+        ok = transactions.transfer(
+            acc1["account_id"], acc2["account_id"], amount, actor_user_id=1
+        )
         assert ok is True
 
         acc1_after = transactions.get_account_by_user(1)
@@ -362,7 +376,9 @@ class TestTransferAtomic:
         acc1 = transactions.get_account_by_user(1)
         acc2 = transactions.get_account_by_user(2)
 
-        ok = transactions.transfer(acc1["account_id"], acc2["account_id"], 999_999.00)
+        ok = transactions.transfer(
+            acc1["account_id"], acc2["account_id"], 999_999.00, actor_user_id=1
+        )
         assert ok is False
 
         # Balances must be unchanged

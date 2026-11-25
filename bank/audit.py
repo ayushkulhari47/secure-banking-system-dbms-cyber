@@ -54,13 +54,15 @@ def log_action(user_id, action: str) -> None:
         conn.close()
 
 
-def verify_audit_log_integrity() -> tuple:
+def verify_audit_log_integrity(admin_user_id: int = None) -> tuple:
     """
-    Verify the cryptographic integrity of the entire Audit_Log table.
+    Verify the cryptographic integrity of the entire Audit_Log table. Admin use only.
     Returns (True, None) if intact, or (False, compromised_log_id) if tampering is detected.
     """
     conn = db.get_connection()
     try:
+        if not db._is_admin(conn, admin_user_id):
+            raise PermissionError("Only administrators may verify audit log integrity.")
         rows = conn.execute("SELECT * FROM Audit_Log ORDER BY log_id ASC").fetchall()
         expected_prev = GENESIS_HASH
         for row in rows:

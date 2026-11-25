@@ -152,12 +152,20 @@ def authenticate(email: str, password: str) -> tuple:
     return None, GENERIC_LOGIN_ERROR
 
 
-def change_password(user_id: int, old_password: str, new_password: str) -> tuple:
+def change_password(
+    user_id: int,
+    old_password: str,
+    new_password: str,
+    actor_user_id: int = None,
+) -> tuple:
     """
-    Change a user's password with old-password verification, complexity check,
-    reuse prevention, atomic update, and audit logging.
+    Change a user's password with ownership check, old-password verification,
+    complexity check, reuse prevention, atomic update, and audit logging.
     Returns (True, None) on success, (False, reason_string) on failure.
     """
+    if actor_user_id is None or actor_user_id != user_id:
+        raise PermissionError("Users may only change their own password.")
+
     conn = db.get_connection()
     try:
         user = conn.execute(
@@ -231,10 +239,12 @@ def unlock_user(user_id: int, admin_user_id: int = None) -> bool:
         conn.close()
 
 
-def get_locked_users() -> list:
-    """Return all currently locked user accounts."""
+def get_locked_users(admin_user_id: int = None) -> list:
+    """Return all currently locked user accounts. Admin use only."""
     conn = db.get_connection()
     try:
+        if not db._is_admin(conn, admin_user_id):
+            return []
         return conn.execute(
             "SELECT user_id, name, email, failed_attempts, created_at "
             "FROM Users WHERE is_locked = 1"

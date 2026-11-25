@@ -130,7 +130,7 @@ class TestTamperEvidentAuditLog:
         audit.log_action(1, "User deposit")
         audit.log_action(2, "User transfer")
 
-        is_valid, corrupted_id = audit.verify_audit_log_integrity()
+        is_valid, corrupted_id = audit.verify_audit_log_integrity(admin_user_id=1)
         assert is_valid is True
         assert corrupted_id is None
 
@@ -147,7 +147,7 @@ class TestTamperEvidentAuditLog:
         )
         conn.close()
 
-        is_valid, corrupted_id = audit.verify_audit_log_integrity()
+        is_valid, corrupted_id = audit.verify_audit_log_integrity(admin_user_id=1)
         assert is_valid is False
         assert (
             corrupted_id == 2
@@ -166,7 +166,7 @@ class TestTamperEvidentAuditLog:
         )
         conn.close()
 
-        is_valid, corrupted_id = audit.verify_audit_log_integrity()
+        is_valid, corrupted_id = audit.verify_audit_log_integrity(admin_user_id=1)
         assert is_valid is False
         assert corrupted_id == 3
 
@@ -181,7 +181,7 @@ class TestTamperEvidentAuditLog:
         )
         conn.close()
 
-        is_valid, corrupted_id = audit.verify_audit_log_integrity()
+        is_valid, corrupted_id = audit.verify_audit_log_integrity(admin_user_id=1)
         assert is_valid is False
         assert corrupted_id == 2
 
@@ -198,16 +198,16 @@ class TestMakerCheckerWorkflow:
         """When a pending transfer is created, no money is deducted or credited."""
         # Rahul (user_id 2, account_id 2, balance 25000)
         # Ayush (user_id 1, account_id 1, balance 50000)
-        acc_rahul_before = transactions.get_account_by_id(2)["balance"]
-        acc_ayush_before = transactions.get_account_by_id(1)["balance"]
+        acc_rahul_before = transactions.get_account_by_id(2, actor_user_id=2)["balance"]
+        acc_ayush_before = transactions.get_account_by_id(1, actor_user_id=1)["balance"]
 
         txn_id = transactions.create_pending_transfer(
-            from_account_id=2, to_account_id=1, amount=10000.00
+            from_account_id=2, to_account_id=1, amount=10000.00, actor_user_id=2
         )
         assert txn_id > 0
 
-        acc_rahul_after = transactions.get_account_by_id(2)["balance"]
-        acc_ayush_after = transactions.get_account_by_id(1)["balance"]
+        acc_rahul_after = transactions.get_account_by_id(2, actor_user_id=2)["balance"]
+        acc_ayush_after = transactions.get_account_by_id(1, actor_user_id=1)["balance"]
 
         assert acc_rahul_after == acc_rahul_before
         assert acc_ayush_after == acc_ayush_before
@@ -219,7 +219,7 @@ class TestMakerCheckerWorkflow:
         """Segregation of Duties (SoD): The maker cannot approve their own transaction."""
         # Rahul (user_id 2, account_id 2) initiates transfer
         txn_id = transactions.create_pending_transfer(
-            from_account_id=2, to_account_id=1, amount=5000.00
+            from_account_id=2, to_account_id=1, amount=5000.00, actor_user_id=2
         )
 
         # Rahul tries to approve his own transfer
@@ -230,13 +230,13 @@ class TestMakerCheckerWorkflow:
         assert "Segregation of Duties" in message
 
         # Balances remain intact
-        assert transactions.get_account_by_id(2)["balance"] == 25000.00
+        assert transactions.get_account_by_id(2, actor_user_id=2)["balance"] == 25000.00
 
     def test_checker_approval_executes_transfer_atomically(self, test_db):
         """An authorized independent checker can approve, executing the atomic debit & credit."""
         # Rahul (account_id 2, balance 25000) -> Priya (account_id 3, balance 15000)
         txn_id = transactions.create_pending_transfer(
-            from_account_id=2, to_account_id=3, amount=8000.00
+            from_account_id=2, to_account_id=3, amount=8000.00, actor_user_id=2
         )
 
         # Ayush (admin, user_id 1) approves
@@ -246,8 +246,8 @@ class TestMakerCheckerWorkflow:
         assert success is True
         assert "approved" in message.lower()
 
-        assert transactions.get_account_by_id(2)["balance"] == 17000.00  # 25000 - 8000
-        assert transactions.get_account_by_id(3)["balance"] == 23000.00  # 15000 + 8000
+        assert transactions.get_account_by_id(2, actor_user_id=2)["balance"] == 17000.00  # 25000 - 8000
+        assert transactions.get_account_by_id(3, actor_user_id=3)["balance"] == 23000.00  # 15000 + 8000
 
         # Check transaction status updated to completed
         conn = db.get_connection()
@@ -260,7 +260,7 @@ class TestMakerCheckerWorkflow:
     def test_checker_rejection_marks_transaction_rejected(self, test_db):
         """A checker can reject a transfer, leaving balances completely untouched."""
         txn_id = transactions.create_pending_transfer(
-            from_account_id=2, to_account_id=3, amount=5000.00
+            from_account_id=2, to_account_id=3, amount=5000.00, actor_user_id=2
         )
 
         success, message = transactions.reject_pending_transfer(
@@ -269,8 +269,8 @@ class TestMakerCheckerWorkflow:
         assert success is True
 
         # Balances unchanged
-        assert transactions.get_account_by_id(2)["balance"] == 25000.00
-        assert transactions.get_account_by_id(3)["balance"] == 15000.00
+        assert transactions.get_account_by_id(2, actor_user_id=2)["balance"] == 25000.00
+        assert transactions.get_account_by_id(3, actor_user_id=3)["balance"] == 15000.00
 
         conn = db.get_connection()
         txn = conn.execute(
@@ -283,11 +283,11 @@ class TestMakerCheckerWorkflow:
         """If the maker spends funds before checker approves, approval fails safely."""
         # Rahul has 25000
         txn_id = transactions.create_pending_transfer(
-            from_account_id=2, to_account_id=3, amount=20000.00
+            from_account_id=2, to_account_id=3, amount=20000.00, actor_user_id=2
         )
 
         # Rahul withdraws 10000, leaving only 15000 in balance
-        assert transactions.withdraw(2, 10000.00) is True
+        assert transactions.withdraw(2, 10000.00, actor_user_id=2) is True
 
         # Admin tries to approve the 20000 transfer
         success, message = transactions.approve_pending_transfer(
@@ -297,7 +297,7 @@ class TestMakerCheckerWorkflow:
         assert "insufficient" in message.lower()
 
         # Balance remains 15000 (not negative)
-        assert transactions.get_account_by_id(2)["balance"] == 15000.00
+        assert transactions.get_account_by_id(2, actor_user_id=2)["balance"] == 15000.00
 
 
 # ===========================================================================
@@ -318,7 +318,7 @@ class TestAdminAccountUnlock:
         assert user["is_locked"] == 1
         assert user["failed_attempts"] >= config.MAX_FAILED_LOGINS
 
-        locked_users = auth.get_locked_users()
+        locked_users = auth.get_locked_users(admin_user_id=1)
         assert any(u["user_id"] == 2 for u in locked_users)
 
     def test_admin_unlock_clears_lockout_and_resets_counter(self, test_db):
@@ -332,7 +332,7 @@ class TestAdminAccountUnlock:
         assert user["is_locked"] == 0
         assert user["failed_attempts"] == 0
 
-        locked_users = auth.get_locked_users()
+        locked_users = auth.get_locked_users(admin_user_id=1)
         assert not any(u["user_id"] == 2 for u in locked_users)
 
 

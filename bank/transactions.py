@@ -5,8 +5,34 @@ bank/transactions.py -- Account lookups, ACID banking transactions, and Maker-Ch
 from bank import audit, db
 
 
+def _require_account_owner(conn, account_id: int, actor_user_id: int, lock_clause: str = ""):
+    """Verify actor_user_id is authenticated and owns account_id."""
+    if actor_user_id is None:
+        raise PermissionError("Authentication required.")
+    account = conn.execute(
+        "SELECT * FROM Accounts WHERE account_id = ?" + lock_clause, (account_id,)
+    ).fetchone()
+    if account is not None and account["user_id"] != actor_user_id:
+        raise PermissionError("Access denied: account belongs to another user.")
+    return account
+
+
+def account_exists(account_id: int) -> bool:
+    """Return True if an account ID exists (exposes existence only, no PII or balance)."""
+    conn = db.get_connection()
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM Accounts WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
 def get_account_by_user(user_id: int):
     """Return the Accounts row for a given user_id."""
+    if user_id is None:
+        raise PermissionError("Authentication required.")
     conn = db.get_connection()
     try:
         return conn.execute(
@@ -16,29 +42,37 @@ def get_account_by_user(user_id: int):
         conn.close()
 
 
-def get_account_by_id(account_id: int):
-    """Return the Accounts row for a given account_id."""
+def get_account_by_id(account_id: int, actor_user_id: int = None):
+    """Return the Accounts row if actor_user_id owns it or is an admin."""
+    if actor_user_id is None:
+        raise PermissionError("Authentication required.")
     conn = db.get_connection()
     try:
-        return conn.execute(
+        row = conn.execute(
             "SELECT * FROM Accounts WHERE account_id = ?", (account_id,)
         ).fetchone()
+        if row is None:
+            return None
+        if row["user_id"] != actor_user_id and not db._is_admin(conn, actor_user_id):
+            raise PermissionError("Access denied: cannot view another user's account.")
+        return row
     finally:
         conn.close()
 
 
-def deposit(account_id: int, amount: float) -> None:
+def deposit(account_id: int, amount: float, actor_user_id: int = None) -> None:
     """
     Credit 'amount' to 'account_id' inside an explicit ACID transaction.
+    Requires actor_user_id to own the target account.
     """
+    if actor_user_id is None:
+        raise PermissionError("Authentication required.")
     if amount <= 0:
         raise ValueError("Transaction amount must be greater than zero.")
     conn = db.get_connection()
     try:
         conn.execute("BEGIN")
-        account = conn.execute(
-            "SELECT account_id FROM Accounts WHERE account_id = ?", (account_id,)
-        ).fetchone()
+        account = _require_account_owner(conn, account_id, actor_user_id)
         if account is None:
             conn.execute("ROLLBACK")
             raise ValueError("Source account not found.")
@@ -59,19 +93,21 @@ def deposit(account_id: int, amount: float) -> None:
         conn.close()
 
 
-def withdraw(account_id: int, amount: float) -> bool:
+def withdraw(account_id: int, amount: float, actor_user_id: int = None) -> bool:
     """
     Debit 'amount' from 'account_id' atomically.
+    Requires actor_user_id to own the target account.
     Returns True on success, False if balance is insufficient.
     """
-    if amount <= 0:
-        return False
+    if actor_user_id is None:
+        raise PermissionError("Authentication required.")
     conn = db.get_connection()
     try:
         conn.execute("BEGIN")
-        row = conn.execute(
-            "SELECT balance FROM Accounts WHERE account_id = ?", (account_id,)
-        ).fetchone()
+        row = _require_account_owner(conn, account_id, actor_user_id)
+        if amount <= 0:
+            conn.execute("ROLLBACK")
+            return False
         if row is None or float(row["balance"]) < float(amount):
             conn.execute("ROLLBACK")
             return False
@@ -93,19 +129,26 @@ def withdraw(account_id: int, amount: float) -> bool:
         conn.close()
 
 
-def transfer(from_account_id: int, to_account_id: int, amount: float) -> bool:
+def transfer(
+    from_account_id: int,
+    to_account_id: int,
+    amount: float,
+    actor_user_id: int = None,
+) -> bool:
     """
     Move 'amount' from one account to another atomically.
+    Requires actor_user_id to own from_account_id.
     Returns True on success, False if balance is insufficient or accounts are invalid.
     """
-    if amount <= 0 or from_account_id == to_account_id:
-        return False
+    if actor_user_id is None:
+        raise PermissionError("Authentication required.")
     conn = db.get_connection()
     try:
         conn.execute("BEGIN")
-        row = conn.execute(
-            "SELECT balance FROM Accounts WHERE account_id = ?", (from_account_id,)
-        ).fetchone()
+        row = _require_account_owner(conn, from_account_id, actor_user_id)
+        if amount <= 0 or from_account_id == to_account_id:
+            conn.execute("ROLLBACK")
+            return False
         destination = conn.execute(
             "SELECT account_id FROM Accounts WHERE account_id = ?", (to_account_id,)
         ).fetchone()
@@ -134,10 +177,21 @@ def transfer(from_account_id: int, to_account_id: int, amount: float) -> bool:
         conn.close()
 
 
-def get_transactions_for_account(account_id: int) -> list:
-    """Return all transactions involving a specific account. User-scoped."""
+def get_transactions_for_account(account_id: int, actor_user_id: int = None) -> list:
+    """Return transactions for account_id if actor_user_id owns it or is an admin."""
+    if actor_user_id is None:
+        raise PermissionError("Authentication required.")
     conn = db.get_connection()
     try:
+        acc = conn.execute(
+            "SELECT user_id FROM Accounts WHERE account_id = ?", (account_id,)
+        ).fetchone()
+        if acc is None:
+            return []
+        if acc["user_id"] != actor_user_id and not db._is_admin(conn, actor_user_id):
+            raise PermissionError(
+                "Access denied: cannot view another user's transactions."
+            )
         return conn.execute(
             "SELECT * FROM Transactions"
             " WHERE from_account = ? OR to_account = ?"
@@ -162,12 +216,18 @@ def get_all_transactions(admin_user_id: int = None) -> list:
 
 
 def create_pending_transfer(
-    from_account_id: int, to_account_id: int, amount: float
+    from_account_id: int,
+    to_account_id: int,
+    amount: float,
+    actor_user_id: int = None,
 ) -> int:
     """
     Insert a pending transaction requiring Maker-Checker authorization (ISO 27001 A.6.1.2).
+    Requires actor_user_id to own from_account_id.
     Balances are NOT modified at creation time.
     """
+    if actor_user_id is None:
+        raise PermissionError("Authentication required.")
     if amount <= 0 or from_account_id == to_account_id:
         raise ValueError(
             "Pending transfer must use two accounts and a positive amount."
@@ -176,17 +236,16 @@ def create_pending_transfer(
     try:
         conn.execute("BEGIN")
         lock_clause = " FOR UPDATE" if db.is_mysql_connection(conn) else ""
-        accounts = conn.execute(
-            "SELECT account_id FROM Accounts WHERE account_id IN (?, ?)",
-            (from_account_id, to_account_id),
-        ).fetchall()
-        if len(accounts) != 2:
+        source = _require_account_owner(
+            conn, from_account_id, actor_user_id, lock_clause=lock_clause
+        )
+        destination = conn.execute(
+            "SELECT account_id FROM Accounts WHERE account_id = ?",
+            (to_account_id,),
+        ).fetchone()
+        if source is None or destination is None:
             conn.execute("ROLLBACK")
             raise ValueError("Both transfer accounts must exist.")
-        source = conn.execute(
-            "SELECT balance FROM Accounts WHERE account_id = ?" + lock_clause,
-            (from_account_id,),
-        ).fetchone()
         pending = conn.execute(
             "SELECT COALESCE(SUM(amount), 0) AS amount FROM Transactions "
             "WHERE from_account = ? AND status = 'pending'",
@@ -230,7 +289,10 @@ def get_pending_transfers(admin_user_id: int = None) -> list:
 
 def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
     """
-    Checker approves a pending transfer, enforcing Segregation of Duties (Maker != Checker).
+    Checker approves a pending transfer, enforcing Segregation of Duties:
+      - approver must be an admin
+      - approver cannot be the original maker (from_acc owner)
+      - approver cannot be the recipient (to_acc owner)
     Returns (True, message) or (False, error_reason).
     """
     conn = db.get_connection()
@@ -274,6 +336,17 @@ def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
             return (
                 False,
                 "Segregation of Duties violation: Maker cannot approve their own transfer.",
+            )
+
+        if to_acc["user_id"] == approver_user_id:
+            conn.execute("ROLLBACK")
+            audit.log_action(
+                approver_user_id,
+                f"SoD violation attempt: recipient approval of txn #{txn_id}",
+            )
+            return (
+                False,
+                "Segregation of Duties violation: Recipient cannot approve an incoming transfer.",
             )
 
         if float(from_acc["balance"]) < float(txn["amount"]):
@@ -350,4 +423,3 @@ def reject_pending_transfer(
         raise
     finally:
         conn.close()
-
