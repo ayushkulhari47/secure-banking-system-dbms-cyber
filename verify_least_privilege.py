@@ -6,7 +6,7 @@ switched to DB_USER=bank_app. The script intentionally makes two failed
 attempts and rolls back any unexpected success.
 """
 
-import db
+from bank import db
 
 
 def _expect_denied(label: str, statement: str) -> None:

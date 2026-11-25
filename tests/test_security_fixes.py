@@ -14,15 +14,14 @@ import math
 import time
 import hashlib
 
-import security
-from security import (
+from bank import auth, security
+from bank.security import (
     validate_amount,
     safe_float_input,
     safe_int_input,
     password_meets_policy,
     Session,
 )
-import db as db_module
 
 # ===========================================================================
 # SEC-01  Amount validation  (negative transfer exploit + edge cases)
@@ -304,7 +303,7 @@ class TestBcryptHashing:
 
     def test_hash_is_bcrypt_format(self):
         """hash_password() returns a bcrypt hash string (starts with $2b$)."""
-        hashed = db_module.hash_password("TestPass@99")
+        hashed = auth.hash_password("TestPass@99")
         assert hashed.startswith(
             "$2b$"
         ), f"Expected bcrypt format ($2b$...), got: {hashed[:10]}..."
@@ -315,8 +314,8 @@ class TestBcryptHashing:
         bcrypt embeds a unique random salt each time.
         This is the core property that defeats rainbow table attacks.
         """
-        h1 = db_module.hash_password("SamePass@1")
-        h2 = db_module.hash_password("SamePass@1")
+        h1 = auth.hash_password("SamePass@1")
+        h2 = auth.hash_password("SamePass@1")
         assert h1 != h2, (
             "bcrypt should generate different hashes for the same password "
             "(random salt per call). Got identical hashes -- salt is broken."
@@ -324,13 +323,13 @@ class TestBcryptHashing:
 
     def test_verify_correct_password(self):
         """verify_password() returns True for the correct password."""
-        hashed = db_module.hash_password("Correct@99")
-        assert db_module.verify_password("Correct@99", hashed) is True
+        hashed = auth.hash_password("Correct@99")
+        assert auth.verify_password("Correct@99", hashed) is True
 
     def test_verify_wrong_password(self):
         """verify_password() returns False for a wrong password."""
-        hashed = db_module.hash_password("Right@Pass1")
-        assert db_module.verify_password("Wrong@Pass1", hashed) is False
+        hashed = auth.hash_password("Right@Pass1")
+        assert auth.verify_password("Wrong@Pass1", hashed) is False
 
     def test_sha256_hash_fails_bcrypt_verify(self):
         """
@@ -340,7 +339,7 @@ class TestBcryptHashing:
         """
         sha256_hash = hashlib.sha256("ayush123".encode()).hexdigest()
         # verify_password must fail closed, not crash.
-        result = db_module.verify_password("ayush123", sha256_hash)
+        result = auth.verify_password("ayush123", sha256_hash)
         assert result is False
 
     def test_malformed_hash_fails_safely(self):
@@ -348,7 +347,7 @@ class TestBcryptHashing:
         A completely malformed stored hash does not raise an exception --
         verify_password() catches bcrypt errors and returns False (fail-closed).
         """
-        result = db_module.verify_password("anypassword", "this-is-not-a-bcrypt-hash")
+        result = auth.verify_password("anypassword", "this-is-not-a-bcrypt-hash")
         assert result is False
 
 

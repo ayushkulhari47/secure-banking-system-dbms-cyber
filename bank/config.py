@@ -1,5 +1,5 @@
 """
-config.py  Centralized tuneable configuration parameters for the Secure Banking System.
+bank/config.py -- Centralized tuneable configuration parameters for the Secure Banking System.
 
 Design Decision (IT Audit / Compliance Perspective):
 - Centralizing tuneable security parameters satisfies ISO 27001 A.12.1.1 (Operational
@@ -11,6 +11,8 @@ Design Decision (IT Audit / Compliance Perspective):
 import os
 import sys
 
+BASE_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def load_dotenv(env_path: str = None) -> None:
     """
@@ -18,7 +20,7 @@ def load_dotenv(env_path: str = None) -> None:
     Reads key-value pairs from .env into os.environ if not already set.
     """
     if env_path is None:
-        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        env_path = os.path.join(BASE_DIR, ".env")
     if not os.path.exists(env_path):
         return
     try:
@@ -81,8 +83,7 @@ DB_NAME: str = os.environ.get("DB_NAME", "secure_banking")
 
 # ---------------------------------------------------------------------------
 # Least-privilege grants for the MySQL runtime user 'bank_app'
-# (applied by setup_db.py; checked against the real SQL in db.py by
-#  tests/test_least_privilege.py)
+# (applied by setup_db.py; checked against the real SQL in db.py)
 # ---------------------------------------------------------------------------
 APP_TABLE_GRANTS: dict = {
     "Users": ("SELECT", "UPDATE"),
@@ -112,3 +113,4 @@ SESSION_TIMEOUT_SECONDS: int = 300  # 5 minutes session inactivity timeout
 # Cryptographic Settings
 # ---------------------------------------------------------------------------
 BCRYPT_ROUNDS: int = 12  # Work factor for bcrypt hashing (~250ms per hash)
+

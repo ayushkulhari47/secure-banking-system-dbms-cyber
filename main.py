@@ -1,34 +1,21 @@
 """
-app.py  Secure Banking System  CLI front-end (Phase 2 hardened).
-
-Phase 2 changes vs Phase 1:
-  - safe_float_input / safe_int_input replace bare float()/int() calls
-    so bad input (letters, empty string) never crashes the application.
-  - validate_amount() rejects zero, negative, NaN, and infinite amounts.
-  - Self-transfer is blocked before calling db.transfer().
-  - Full RBAC: users see only their own transactions; audit log and
-    alerts are admin-only; unknown-email logins are logged.
-  - Session inactivity timeout (300 s default): menu loop checks
-    session.is_expired() and logs the user out automatically.
-  - Password policy is enforced on the verify_credentials path;
-    demo seeds are labelled and bypass the policy intentionally.
-  - Brute-force lockout alert is raised with severity='high'.
+main.py -- Secure Banking System CLI entry point.
 """
 
-import db
-import security
+from collections import defaultdict
 import getpass
 import time
-from collections import defaultdict
-from config import (
+
+from bank import alerts, audit, auth, db, security, transactions
+from bank.config import (
     LARGE_TXN_THRESHOLD,
     MAX_FAILED_LOGINS,
 )
-from security import (
+from bank.security import (
+    Session,
     safe_float_input,
     safe_int_input,
     validate_amount,
-    Session,
 )
 
 # Process-local velocity signal. The database remains the source of truth for
@@ -46,55 +33,48 @@ def login() -> tuple:
     """
     Authenticate the user.
     Returns (user_id, user_role) on success, (None, None) on failure.
-
-    Security controls active:
-      - Unknown email is logged with user_id=NULL (fixes Phase 0 finding).
-      - is_locked checked before password comparison (fail-fast).
-      - verify_password() uses bcrypt.checkpw() -- timing-safe.
-      - Failed attempts are persisted to DB -- survive app restart.
-      - Account is locked after MAX_FAILED_LOGINS; high-severity alert raised.
     """
     print("\n--- Login ---")
     email = input("Email: ").strip()
     password = getpass.getpass("Password: ")
 
     if security.detect_sqli(email):
-        db.log_action(None, "SQL injection pattern detected during login")
-        db.raise_alert(
+        audit.log_action(None, "SQL injection pattern detected during login")
+        alerts.raise_alert(
             None,
             "SQL Injection Signal",
             "Suspicious login input pattern detected",
             severity="high",
         )
 
-    user = db.get_user_by_email(email)
+    user = auth.get_user_by_email(email)
 
     if user is None:
         # Run a dummy bcrypt check so unknown-email and wrong-password paths
         # have comparable work, and never disclose whether an email exists.
-        db.verify_password(password, db.DUMMY_PASSWORD_HASH)
-        db.log_action(None, "Failed login -- invalid credentials")
+        auth.verify_password(password, auth.DUMMY_PASSWORD_HASH)
+        audit.log_action(None, "Failed login -- invalid credentials")
         print("Invalid email or password.")
         return None, None
 
     if user["is_locked"]:
-        db.log_action(user["user_id"], "Login attempt on locked account")
+        audit.log_action(user["user_id"], "Login attempt on locked account")
         print("Account is locked due to multiple failed attempts. Contact admin.")
         return None, None
 
-    if db.verify_password(password, user["password_hash"]):
-        db.reset_failed_attempts(user["user_id"])
-        db.log_action(user["user_id"], "Successful login")
+    if auth.verify_password(password, user["password_hash"]):
+        auth.reset_failed_attempts(user["user_id"])
+        audit.log_action(user["user_id"], "Successful login")
         print(f"\nWelcome {user['name']}!  Role: {user['role']}")
         return user["user_id"], user["role"]
 
     # Wrong password path.
-    db.increment_failed_attempts(user["user_id"], max_attempts=MAX_FAILED_LOGINS)
-    attempts_now = db.get_failed_attempts(user["user_id"])
-    db.log_action(user["user_id"], f"Failed login attempt #{attempts_now}")
+    auth.increment_failed_attempts(user["user_id"], max_attempts=MAX_FAILED_LOGINS)
+    attempts_now = auth.get_failed_attempts(user["user_id"])
+    audit.log_action(user["user_id"], f"Failed login attempt #{attempts_now}")
 
     if attempts_now >= MAX_FAILED_LOGINS:
-        db.raise_alert(
+        alerts.raise_alert(
             user["user_id"],
             "Brute Force",
             f"Account locked after {attempts_now} failed attempts",
@@ -114,14 +94,14 @@ def _record_transaction_signals(user_id: int, action: str) -> None:
     times.append(now)
     flagged, count = security.check_velocity(times)
     if flagged:
-        db.raise_alert(
+        alerts.raise_alert(
             user_id,
             "Rapid Transactions",
             f"{count} transactions detected within {security.VELOCITY_WINDOW_SECONDS} seconds",
             severity="high",
         )
     if security.is_odd_hour():
-        db.raise_alert(
+        alerts.raise_alert(
             user_id,
             "Odd-Hour Transaction",
             f"{action} submitted during configured quiet hours",
@@ -130,15 +110,13 @@ def _record_transaction_signals(user_id: int, action: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Banking operations  (Phase 2: input-safe, amount-validated)
+# Banking operations
 # ---------------------------------------------------------------------------
 
 
 def do_deposit(user_id: int, session: Session) -> None:
-    """
-    SEC-01 + SEC-02: amount validated; safe input wrapper.
-    """
-    acc = db.get_account_by_user(user_id)
+    """Deposit validated funds into the authenticated user's account."""
+    acc = transactions.get_account_by_user(user_id)
     if acc is None:
         print("No account found.")
         return
@@ -150,22 +128,20 @@ def do_deposit(user_id: int, session: Session) -> None:
     ok, reason = validate_amount(amount)
     if not ok:
         print(f"  [!] Invalid amount: {reason}")
-        db.log_action(user_id, f"Rejected deposit attempt -- {reason}")
+        audit.log_action(user_id, f"Rejected deposit attempt -- {reason}")
         return
 
-    db.deposit(acc["account_id"], amount)
-    db.log_action(user_id, f"Deposited Rs{amount:.2f}")
+    transactions.deposit(acc["account_id"], amount)
+    audit.log_action(user_id, f"Deposited Rs{amount:.2f}")
     _record_transaction_signals(user_id, "Deposit")
-    updated = db.get_account_by_user(user_id)
+    updated = transactions.get_account_by_user(user_id)
     print(f"Rs{amount:.2f} deposited!  New balance: Rs{updated['balance']:.2f}")
     session.refresh()
 
 
 def do_withdraw(user_id: int, session: Session) -> None:
-    """
-    SEC-01 + SEC-02: amount validated; safe input wrapper.
-    """
-    acc = db.get_account_by_user(user_id)
+    """Withdraw validated funds from the authenticated user's account."""
+    acc = transactions.get_account_by_user(user_id)
     if acc is None:
         print("No account found.")
         return
@@ -177,21 +153,21 @@ def do_withdraw(user_id: int, session: Session) -> None:
     ok, reason = validate_amount(amount)
     if not ok:
         print(f"  [!] Invalid amount: {reason}")
-        db.log_action(user_id, f"Rejected withdrawal attempt -- {reason}")
+        audit.log_action(user_id, f"Rejected withdrawal attempt -- {reason}")
         return
 
-    success = db.withdraw(acc["account_id"], amount)
+    success = transactions.withdraw(acc["account_id"], amount)
     if success:
-        db.log_action(user_id, f"Withdrew Rs{amount:.2f}")
+        audit.log_action(user_id, f"Withdrew Rs{amount:.2f}")
         _record_transaction_signals(user_id, "Withdrawal")
         if amount > LARGE_TXN_THRESHOLD:
-            db.raise_alert(
+            alerts.raise_alert(
                 user_id,
                 "Large Transaction",
                 f"Large withdrawal of Rs{amount:.2f} detected",
                 severity="high",
             )
-        updated = db.get_account_by_user(user_id)
+        updated = transactions.get_account_by_user(user_id)
         print(f"Rs{amount:.2f} withdrawn!  New balance: Rs{updated['balance']:.2f}")
     else:
         print("Insufficient balance!")
@@ -199,19 +175,8 @@ def do_withdraw(user_id: int, session: Session) -> None:
 
 
 def do_transfer(user_id: int, session: Session) -> None:
-    """
-    SEC-01 + SEC-02 + SEC-03 + SEC-06 (self-transfer block):
-      - Safe integer input for destination account.
-      - Safe float input for amount.
-      - Amount validated (positive, finite, within cap).
-      - Self-transfer explicitly rejected before DB call.
-
-    Why self-transfer matters:
-      The original code allowed transferring to your own account. While it
-      does not steal money, it artificially inflates transaction counts and
-      can be used to generate fake audit trails. It also wastes DB writes.
-    """
-    acc = db.get_account_by_user(user_id)
+    """Transfer validated funds or queue high-value transfers for Maker-Checker."""
+    acc = transactions.get_account_by_user(user_id)
     if acc is None:
         print("No account found.")
         return
@@ -223,12 +188,12 @@ def do_transfer(user_id: int, session: Session) -> None:
     # SEC-06: Block self-transfer.
     if to_acc_id == acc["account_id"]:
         print("  [!] Self-transfer is not permitted.")
-        db.log_action(
+        audit.log_action(
             user_id, f"Rejected self-transfer attempt on account {acc['account_id']}"
         )
         return
 
-    dest = db.get_account_by_id(to_acc_id)
+    dest = transactions.get_account_by_id(to_acc_id)
     if dest is None:
         print("Destination account not found!")
         return
@@ -240,24 +205,26 @@ def do_transfer(user_id: int, session: Session) -> None:
     ok, reason = validate_amount(amount)
     if not ok:
         print(f"  [!] Invalid amount: {reason}")
-        db.log_action(user_id, f"Rejected transfer attempt -- {reason}")
+        audit.log_action(user_id, f"Rejected transfer attempt -- {reason}")
         return
 
     # Route to Maker-Checker dual control if amount exceeds large transaction threshold
     if amount > LARGE_TXN_THRESHOLD:
         try:
-            txn_id = db.create_pending_transfer(acc["account_id"], to_acc_id, amount)
+            txn_id = transactions.create_pending_transfer(
+                acc["account_id"], to_acc_id, amount
+            )
         except ValueError as exc:
             print(f"  [!] Transfer not submitted: {exc}")
-            db.log_action(user_id, f"Rejected pending transfer attempt -- {exc}")
+            audit.log_action(user_id, f"Rejected pending transfer attempt -- {exc}")
             session.refresh()
             return
-        db.log_action(
+        audit.log_action(
             user_id,
             f"Initiated transfer #{txn_id} of Rs{amount:.2f} to account {to_acc_id} "
             "(pending Maker-Checker approval)",
         )
-        db.raise_alert(
+        alerts.raise_alert(
             user_id,
             "Large Transaction Pending Approval",
             f"Transfer #{txn_id} of Rs{amount:.2f} to account {to_acc_id} "
@@ -278,11 +245,11 @@ def do_transfer(user_id: int, session: Session) -> None:
         session.refresh()
         return
 
-    success = db.transfer(acc["account_id"], to_acc_id, amount)
+    success = transactions.transfer(acc["account_id"], to_acc_id, amount)
     if success:
-        db.log_action(user_id, f"Transferred Rs{amount:.2f} to account {to_acc_id}")
+        audit.log_action(user_id, f"Transferred Rs{amount:.2f} to account {to_acc_id}")
         _record_transaction_signals(user_id, "Transfer")
-        updated = db.get_account_by_user(user_id)
+        updated = transactions.get_account_by_user(user_id)
         print(f"Rs{amount:.2f} transferred!  New balance: Rs{updated['balance']:.2f}")
     else:
         print("Insufficient balance!")
@@ -295,7 +262,8 @@ def do_transfer(user_id: int, session: Session) -> None:
 
 
 def view_balance(user_id: int, session: Session) -> None:
-    acc = db.get_account_by_user(user_id)
+    """Display the authenticated user's account ID and current balance."""
+    acc = transactions.get_account_by_user(user_id)
     if acc:
         print(f"\nAccount ID: {acc['account_id']}  |  Balance: Rs{acc['balance']:.2f}")
     else:
@@ -304,19 +272,16 @@ def view_balance(user_id: int, session: Session) -> None:
 
 
 def view_transactions(user_id: int, role: str, session: Session) -> None:
-    """
-    RBAC: Users see only their own transactions (scoped by account_id).
-          Admins see all transactions.
-    """
+    """Display transaction history scoped by role."""
     print("\n--- Transaction History ---")
     if role == "admin":
-        rows = db.get_all_transactions(admin_user_id=user_id)
+        rows = transactions.get_all_transactions(admin_user_id=user_id)
     else:
-        acc = db.get_account_by_user(user_id)
+        acc = transactions.get_account_by_user(user_id)
         if acc is None:
             print("No account found.")
             return
-        rows = db.get_transactions_for_account(acc["account_id"])
+        rows = transactions.get_transactions_for_account(acc["account_id"])
 
     if not rows:
         print("No transactions found.")
@@ -333,16 +298,15 @@ def view_transactions(user_id: int, role: str, session: Session) -> None:
 
 
 def view_audit_log(user_id: int, role: str, session: Session) -> None:
-    """
-    RBAC: Admin-only.
-    Any non-admin attempt is logged as an unauthorized access event.
-    """
+    """Display recent audit log entries (admin only)."""
     if role != "admin":
         print("  [!] Access denied -- admin only.")
-        db.log_action(user_id, "RBAC violation: unauthorized attempt to view audit log")
+        audit.log_action(
+            user_id, "RBAC violation: unauthorized attempt to view audit log"
+        )
         return
     print("\n--- Audit Log (Cryptographic Hash Chained) ---")
-    rows = db.get_audit_log(admin_user_id=user_id)
+    rows = audit.get_audit_log(admin_user_id=user_id)
     for row in rows:
         uid = str(row["user_id"]) if row["user_id"] is not None else "UNKNOWN"
         print(
@@ -352,16 +316,15 @@ def view_audit_log(user_id: int, role: str, session: Session) -> None:
 
 
 def view_alerts(user_id: int, role: str, session: Session) -> None:
-    """
-    RBAC: Admin-only.
-    Any non-admin attempt is logged as an unauthorized access event.
-    """
+    """Display all security alerts (admin only)."""
     if role != "admin":
         print("  [!] Access denied -- admin only.")
-        db.log_action(user_id, "RBAC violation: unauthorized attempt to view alerts")
+        audit.log_action(
+            user_id, "RBAC violation: unauthorized attempt to view alerts"
+        )
         return
     print("\n--- Security Alerts ---")
-    rows = db.get_all_alerts(admin_user_id=user_id)
+    rows = alerts.get_all_alerts(admin_user_id=user_id)
     if not rows:
         print("No alerts.")
         session.refresh()
@@ -376,24 +339,13 @@ def view_alerts(user_id: int, role: str, session: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Change Password (Phase 3 -- ISO 27001:2022 A.5.17)
+# Change Password
 # ---------------------------------------------------------------------------
 
 
 def do_change_password(user_id: int, session: Session) -> None:
-    """
-    Allow any authenticated user to change their own password.
-
-    Security controls:
-      - Old password verified (timing-safe bcrypt.checkpw)
-      - New password must pass complexity policy
-      - New password must differ from old
-      - All of the above enforced inside db.change_password()
-      - Audit log entry written on success (no plaintext stored)
-    """
+    """Allow an authenticated user to change their own password."""
     print("\n--- Change Password ---")
-    import getpass
-
     old_pw = getpass.getpass("Current password: ")
     new_pw = getpass.getpass("New password: ")
     new_pw2 = getpass.getpass("Confirm new password: ")
@@ -402,7 +354,7 @@ def do_change_password(user_id: int, session: Session) -> None:
         print("  [!] New passwords do not match. Password not changed.")
         return
 
-    ok, reason = db.change_password(user_id, old_pw, new_pw)
+    ok, reason = auth.change_password(user_id, old_pw, new_pw)
     if ok:
         print("  [+] Password changed successfully.")
         session.refresh()
@@ -411,24 +363,21 @@ def do_change_password(user_id: int, session: Session) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Phase 3 Admin Control Consoles (Maker-Checker, Unlock, Alert Resolution, Integrity)
+# Admin Control Consoles
 # ---------------------------------------------------------------------------
 
 
 def manage_pending_transfers(user_id: int, role: str, session: Session) -> None:
-    """
-    RBAC: Admin-only. Maker-Checker dual control console.
-    Review, approve, or reject transactions that exceeded LARGE_TXN_THRESHOLD.
-    """
+    """Admin-only Maker-Checker dual control console."""
     if role != "admin":
         print("  [!] Access denied -- admin only.")
-        db.log_action(
+        audit.log_action(
             user_id, "RBAC violation: unauthorized attempt to manage pending transfers"
         )
         return
 
     print("\n--- Pending Transfers (Maker-Checker Dual Control) ---")
-    rows = db.get_pending_transfers(admin_user_id=user_id)
+    rows = transactions.get_pending_transfers(admin_user_id=user_id)
     if not rows:
         print("No pending transfers awaiting approval.")
         session.refresh()
@@ -449,14 +398,14 @@ def manage_pending_transfers(user_id: int, role: str, session: Session) -> None:
 
     action = input("Action: [A]pprove or [R]eject? ").strip().upper()
     if action == "A":
-        success, msg = db.approve_pending_transfer(txn_id_input, user_id)
+        success, msg = transactions.approve_pending_transfer(txn_id_input, user_id)
         if success:
             print(f"  [+] {msg}")
         else:
             print(f"  [!] Approval failed: {msg}")
     elif action == "R":
         reason = input("Enter rejection reason (or leave blank): ").strip()
-        success, msg = db.reject_pending_transfer(
+        success, msg = transactions.reject_pending_transfer(
             txn_id_input, user_id, reason or "Rejected by administrator"
         )
         if success:
@@ -469,19 +418,16 @@ def manage_pending_transfers(user_id: int, role: str, session: Session) -> None:
 
 
 def manage_locked_users(user_id: int, role: str, session: Session) -> None:
-    """
-    RBAC: Admin-only.
-    Account lockout remediation / admin unlock (ISO 27001 A.9.4.2).
-    """
+    """Admin-only account lockout remediation console."""
     if role != "admin":
         print("  [!] Access denied -- admin only.")
-        db.log_action(
+        audit.log_action(
             user_id, "RBAC violation: unauthorized attempt to unlock accounts"
         )
         return
 
     print("\n--- Locked User Accounts ---")
-    rows = db.get_locked_users()
+    rows = auth.get_locked_users()
     if not rows:
         print("No accounts are currently locked.")
         session.refresh()
@@ -498,7 +444,7 @@ def manage_locked_users(user_id: int, role: str, session: Session) -> None:
         session.refresh()
         return
 
-    if db.unlock_user(target_id, admin_user_id=user_id):
+    if auth.unlock_user(target_id, admin_user_id=user_id):
         print(f"  [+] User #{target_id} has been unlocked successfully.")
     else:
         print(f"  [!] User #{target_id} not found.")
@@ -506,17 +452,16 @@ def manage_locked_users(user_id: int, role: str, session: Session) -> None:
 
 
 def manage_alerts(user_id: int, role: str, session: Session) -> None:
-    """
-    RBAC: Admin-only.
-    View alerts and move them through open -> reviewed -> closed.
-    """
+    """Admin-only alert triage and resolution console."""
     if role != "admin":
         print("  [!] Access denied -- admin only.")
-        db.log_action(user_id, "RBAC violation: unauthorized attempt to manage alerts")
+        audit.log_action(
+            user_id, "RBAC violation: unauthorized attempt to manage alerts"
+        )
         return
 
     print("\n--- Security Alerts Console ---")
-    rows = db.get_all_alerts(admin_user_id=user_id)
+    rows = alerts.get_all_alerts(admin_user_id=user_id)
     if not rows:
         print("No alerts recorded.")
         session.refresh()
@@ -540,13 +485,13 @@ def manage_alerts(user_id: int, role: str, session: Session) -> None:
                 print("  [!] Alert not found or already closed.")
             elif target["status"] == "open":
                 note = input("Review note (optional): ").strip()
-                if db.review_alert(alert_id_input, user_id, note):
+                if alerts.review_alert(alert_id_input, user_id, note):
                     print(f"  [+] Alert #{alert_id_input} marked as reviewed.")
                 else:
                     print("  [!] Alert could not be reviewed.")
             else:
                 note = input("Closure note (optional): ").strip()
-                if db.close_alert(alert_id_input, user_id, note):
+                if alerts.close_alert(alert_id_input, user_id, note):
                     print(f"  [+] Alert #{alert_id_input} marked as closed.")
                 else:
                     print("  [!] Alert could not be closed.")
@@ -554,19 +499,16 @@ def manage_alerts(user_id: int, role: str, session: Session) -> None:
 
 
 def verify_audit_integrity_menu(user_id: int, role: str, session: Session) -> None:
-    """
-    RBAC: Admin-only.
-    Cryptographic verification of the tamper-evident audit log chain.
-    """
+    """Admin-only cryptographic audit log integrity verification."""
     if role != "admin":
         print("  [!] Access denied -- admin only.")
-        db.log_action(
+        audit.log_action(
             user_id, "RBAC violation: unauthorized attempt to verify audit log"
         )
         return
 
     print("\n--- Audit Log Cryptographic Integrity Verification ---")
-    is_valid, bad_id = db.verify_audit_log_integrity()
+    is_valid, bad_id = audit.verify_audit_log_integrity()
     if is_valid:
         print("  [+] INTEGRITY PASS: All cryptographic SHA-256 hash chains match.")
         print("      No records have been modified, deleted, or inserted out of order.")
@@ -575,7 +517,7 @@ def verify_audit_integrity_menu(user_id: int, role: str, session: Session) -> No
         print(
             "      Hash pointer mismatch indicates unauthorized database modification."
         )
-        db.raise_alert(
+        alerts.raise_alert(
             user_id,
             "Audit Log Tampering",
             f"Cryptographic hash mismatch detected at audit log entry #{bad_id}",
@@ -590,21 +532,12 @@ def verify_audit_integrity_menu(user_id: int, role: str, session: Session) -> No
 
 
 def menu(user_id: int, role: str) -> None:
-    """
-    Main menu loop.
-
-    SEC-05 Session timeout:
-      Before displaying the menu, check if the session has been idle for
-      more than SESSION_TIMEOUT_SECONDS (300 s / 5 minutes).
-      If expired, log the event and exit the menu automatically.
-      session.refresh() is called inside every action function.
-    """
-    session = Session()  # inactivity clock starts at login
+    """Main interactive CLI menu loop with inactivity timeout enforcement."""
+    session = Session()
 
     while True:
-        # SEC-05: Inactivity check on every iteration.
         if session.is_expired():
-            db.log_action(user_id, "Session expired due to inactivity -- auto-logout")
+            audit.log_action(user_id, "Session expired due to inactivity -- auto-logout")
             print("\n[!] Session timed out due to inactivity. Goodbye!")
             return
 
@@ -656,7 +589,7 @@ def menu(user_id: int, role: str) -> None:
             if role == "admin":
                 manage_pending_transfers(user_id, role, session)
             else:
-                db.log_action(user_id, "Logged out")
+                audit.log_action(user_id, "Logged out")
                 print("Goodbye!")
                 break
         elif choice == "10" and role == "admin":
@@ -664,20 +597,16 @@ def menu(user_id: int, role: str) -> None:
         elif choice == "11" and role == "admin":
             verify_audit_integrity_menu(user_id, role, session)
         elif choice == "12" and role == "admin":
-            db.log_action(user_id, "Logged out")
+            audit.log_action(user_id, "Logged out")
             print("Goodbye!")
             break
         else:
             print("Invalid choice.")
-            # Do NOT refresh session on invalid input -- keeps the clock running.
 
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     db.init_db()
     user_id, role = login()
     if user_id:
         menu(user_id, role)
+

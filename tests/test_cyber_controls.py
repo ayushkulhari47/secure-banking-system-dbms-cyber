@@ -14,8 +14,7 @@ Run: pytest tests/test_cyber_controls.py -v
 import os
 import pytest
 
-import config
-import db
+from bank import alerts, audit, auth, config, db, transactions
 
 
 @pytest.fixture
@@ -88,9 +87,9 @@ class TestTamperEvidentAuditLog:
 
     def test_audit_log_hash_chain_creation(self, test_db):
         """Writing audit entries creates a cryptographic SHA-256 hash chain."""
-        db.log_action(1, "First action")
-        db.log_action(2, "Second action")
-        db.log_action(3, "Third action")
+        audit.log_action(1, "First action")
+        audit.log_action(2, "Second action")
+        audit.log_action(3, "Third action")
 
         conn = db.get_connection()
         rows = conn.execute("SELECT * FROM Audit_Log ORDER BY log_id ASC").fetchall()
@@ -98,7 +97,7 @@ class TestTamperEvidentAuditLog:
 
         assert len(rows) >= 3
         # First entry in chain must link to GENESIS_HASH
-        assert rows[0]["previous_hash"] == db.GENESIS_HASH
+        assert rows[0]["previous_hash"] == audit.GENESIS_HASH
         assert rows[0]["entry_hash"] is not None
         # Subsequent entries link to previous entry_hash
         assert rows[1]["previous_hash"] == rows[0]["entry_hash"]
@@ -106,19 +105,19 @@ class TestTamperEvidentAuditLog:
 
     def test_audit_log_integrity_passes_when_untampered(self, test_db):
         """verify_audit_log_integrity() returns (True, None) for legitimate audit log."""
-        db.log_action(1, "User login")
-        db.log_action(1, "User deposit")
-        db.log_action(2, "User transfer")
+        audit.log_action(1, "User login")
+        audit.log_action(1, "User deposit")
+        audit.log_action(2, "User transfer")
 
-        is_valid, corrupted_id = db.verify_audit_log_integrity()
+        is_valid, corrupted_id = audit.verify_audit_log_integrity()
         assert is_valid is True
         assert corrupted_id is None
 
     def test_tamper_detection_on_modified_action(self, test_db):
         """If an attacker modifies the action text of an audit row, the integrity check fails."""
-        db.log_action(1, "Legitimate transfer of Rs500")
-        db.log_action(2, "Password change")
-        db.log_action(3, "Account view")
+        audit.log_action(1, "Legitimate transfer of Rs500")
+        audit.log_action(2, "Password change")
+        audit.log_action(3, "Account view")
 
         # Attacker modifies the second entry directly in SQLite
         conn = db.get_connection()
@@ -127,7 +126,7 @@ class TestTamperEvidentAuditLog:
         )
         conn.close()
 
-        is_valid, corrupted_id = db.verify_audit_log_integrity()
+        is_valid, corrupted_id = audit.verify_audit_log_integrity()
         assert is_valid is False
         assert (
             corrupted_id == 2
@@ -135,9 +134,9 @@ class TestTamperEvidentAuditLog:
 
     def test_tamper_detection_on_broken_hash_link(self, test_db):
         """If an attacker deletes or alters a hash link, integrity check detects the rupture."""
-        db.log_action(1, "Step 1")
-        db.log_action(1, "Step 2")
-        db.log_action(1, "Step 3")
+        audit.log_action(1, "Step 1")
+        audit.log_action(1, "Step 2")
+        audit.log_action(1, "Step 3")
 
         # Attacker falsifies the previous_hash link
         conn = db.get_connection()
@@ -146,13 +145,13 @@ class TestTamperEvidentAuditLog:
         )
         conn.close()
 
-        is_valid, corrupted_id = db.verify_audit_log_integrity()
+        is_valid, corrupted_id = audit.verify_audit_log_integrity()
         assert is_valid is False
         assert corrupted_id == 3
 
     def test_blank_hash_gap_is_tampering(self, test_db):
         """Rows without hashes are gaps, not valid legacy entries."""
-        db.log_action(1, "Complete entry")
+        audit.log_action(1, "Complete entry")
         conn = db.get_connection()
         conn.execute(
             "INSERT INTO Audit_Log (user_id, action, previous_hash, entry_hash) "
@@ -161,7 +160,7 @@ class TestTamperEvidentAuditLog:
         )
         conn.close()
 
-        is_valid, corrupted_id = db.verify_audit_log_integrity()
+        is_valid, corrupted_id = audit.verify_audit_log_integrity()
         assert is_valid is False
         assert corrupted_id == 2
 
@@ -178,56 +177,56 @@ class TestMakerCheckerWorkflow:
         """When a pending transfer is created, no money is deducted or credited."""
         # Rahul (user_id 2, account_id 2, balance 25000)
         # Ayush (user_id 1, account_id 1, balance 50000)
-        acc_rahul_before = db.get_account_by_id(2)["balance"]
-        acc_ayush_before = db.get_account_by_id(1)["balance"]
+        acc_rahul_before = transactions.get_account_by_id(2)["balance"]
+        acc_ayush_before = transactions.get_account_by_id(1)["balance"]
 
-        txn_id = db.create_pending_transfer(
+        txn_id = transactions.create_pending_transfer(
             from_account_id=2, to_account_id=1, amount=10000.00
         )
         assert txn_id > 0
 
-        acc_rahul_after = db.get_account_by_id(2)["balance"]
-        acc_ayush_after = db.get_account_by_id(1)["balance"]
+        acc_rahul_after = transactions.get_account_by_id(2)["balance"]
+        acc_ayush_after = transactions.get_account_by_id(1)["balance"]
 
         assert acc_rahul_after == acc_rahul_before
         assert acc_ayush_after == acc_ayush_before
 
-        pending = db.get_pending_transfers(admin_user_id=1)
+        pending = transactions.get_pending_transfers(admin_user_id=1)
         assert any(t["txn_id"] == txn_id for t in pending)
 
     def test_segregation_of_duties_prevents_maker_self_approval(self, test_db):
         """Segregation of Duties (SoD): The maker cannot approve their own transaction."""
         # Rahul (user_id 2, account_id 2) initiates transfer
-        txn_id = db.create_pending_transfer(
+        txn_id = transactions.create_pending_transfer(
             from_account_id=2, to_account_id=1, amount=5000.00
         )
 
         # Rahul tries to approve his own transfer
-        success, message = db.approve_pending_transfer(
+        success, message = transactions.approve_pending_transfer(
             txn_id=txn_id, approver_user_id=2
         )
         assert success is False
         assert "Segregation of Duties" in message
 
         # Balances remain intact
-        assert db.get_account_by_id(2)["balance"] == 25000.00
+        assert transactions.get_account_by_id(2)["balance"] == 25000.00
 
     def test_checker_approval_executes_transfer_atomically(self, test_db):
         """An authorized independent checker can approve, executing the atomic debit & credit."""
         # Rahul (account_id 2, balance 25000) -> Priya (account_id 3, balance 15000)
-        txn_id = db.create_pending_transfer(
+        txn_id = transactions.create_pending_transfer(
             from_account_id=2, to_account_id=3, amount=8000.00
         )
 
         # Ayush (admin, user_id 1) approves
-        success, message = db.approve_pending_transfer(
+        success, message = transactions.approve_pending_transfer(
             txn_id=txn_id, approver_user_id=1
         )
         assert success is True
         assert "approved" in message.lower()
 
-        assert db.get_account_by_id(2)["balance"] == 17000.00  # 25000 - 8000
-        assert db.get_account_by_id(3)["balance"] == 23000.00  # 15000 + 8000
+        assert transactions.get_account_by_id(2)["balance"] == 17000.00  # 25000 - 8000
+        assert transactions.get_account_by_id(3)["balance"] == 23000.00  # 15000 + 8000
 
         # Check transaction status updated to completed
         conn = db.get_connection()
@@ -239,18 +238,18 @@ class TestMakerCheckerWorkflow:
 
     def test_checker_rejection_marks_transaction_rejected(self, test_db):
         """A checker can reject a transfer, leaving balances completely untouched."""
-        txn_id = db.create_pending_transfer(
+        txn_id = transactions.create_pending_transfer(
             from_account_id=2, to_account_id=3, amount=5000.00
         )
 
-        success, message = db.reject_pending_transfer(
+        success, message = transactions.reject_pending_transfer(
             txn_id=txn_id, approver_user_id=1, reason="Suspicious pattern"
         )
         assert success is True
 
         # Balances unchanged
-        assert db.get_account_by_id(2)["balance"] == 25000.00
-        assert db.get_account_by_id(3)["balance"] == 15000.00
+        assert transactions.get_account_by_id(2)["balance"] == 25000.00
+        assert transactions.get_account_by_id(3)["balance"] == 15000.00
 
         conn = db.get_connection()
         txn = conn.execute(
@@ -262,22 +261,22 @@ class TestMakerCheckerWorkflow:
     def test_insufficient_funds_at_approval_time_rejects(self, test_db):
         """If the maker spends funds before checker approves, approval fails safely."""
         # Rahul has 25000
-        txn_id = db.create_pending_transfer(
+        txn_id = transactions.create_pending_transfer(
             from_account_id=2, to_account_id=3, amount=20000.00
         )
 
         # Rahul withdraws 10000, leaving only 15000 in balance
-        assert db.withdraw(2, 10000.00) is True
+        assert transactions.withdraw(2, 10000.00) is True
 
         # Admin tries to approve the 20000 transfer
-        success, message = db.approve_pending_transfer(
+        success, message = transactions.approve_pending_transfer(
             txn_id=txn_id, approver_user_id=1
         )
         assert success is False
         assert "insufficient" in message.lower()
 
         # Balance remains 15000 (not negative)
-        assert db.get_account_by_id(2)["balance"] == 15000.00
+        assert transactions.get_account_by_id(2)["balance"] == 15000.00
 
 
 # ===========================================================================
@@ -292,27 +291,27 @@ class TestAdminAccountUnlock:
         """Account is locked when failed attempts hit MAX_FAILED_LOGINS."""
         # User 2 (Rahul)
         for _ in range(config.MAX_FAILED_LOGINS):
-            db.increment_failed_attempts(2)
+            auth.increment_failed_attempts(2)
 
-        user = db.get_user_by_email("rahul@bank.com")
+        user = auth.get_user_by_email("rahul@bank.com")
         assert user["is_locked"] == 1
         assert user["failed_attempts"] >= config.MAX_FAILED_LOGINS
 
-        locked_users = db.get_locked_users()
+        locked_users = auth.get_locked_users()
         assert any(u["user_id"] == 2 for u in locked_users)
 
     def test_admin_unlock_clears_lockout_and_resets_counter(self, test_db):
         """Admin unlock sets is_locked=0 and resets failed_attempts=0."""
         for _ in range(config.MAX_FAILED_LOGINS):
-            db.increment_failed_attempts(2)
+            auth.increment_failed_attempts(2)
 
-        assert db.unlock_user(user_id=2, admin_user_id=1) is True
+        assert auth.unlock_user(user_id=2, admin_user_id=1) is True
 
-        user = db.get_user_by_email("rahul@bank.com")
+        user = auth.get_user_by_email("rahul@bank.com")
         assert user["is_locked"] == 0
         assert user["failed_attempts"] == 0
 
-        locked_users = db.get_locked_users()
+        locked_users = auth.get_locked_users()
         assert not any(u["user_id"] == 2 for u in locked_users)
 
 
@@ -326,45 +325,45 @@ class TestSecurityAlertRemediation:
 
     def test_alert_workflow_requires_review_before_close(self, test_db):
         """An alert must be reviewed before an administrator can close it."""
-        db.raise_alert(
+        alerts.raise_alert(
             user_id=2,
             alert_type="Brute Force",
             description="3 failed attempts",
             severity="high",
         )
 
-        open_alerts = db.get_open_alerts(admin_user_id=1)
+        open_alerts = alerts.get_open_alerts(admin_user_id=1)
         assert len(open_alerts) >= 1
         target_alert = open_alerts[0]
         assert target_alert["status"] == "open"
 
         alert_id = target_alert["alert_id"]
-        assert db.close_alert(alert_id=alert_id, admin_user_id=1) is False
+        assert alerts.close_alert(alert_id=alert_id, admin_user_id=1) is False
         assert (
-            db.review_alert(
+            alerts.review_alert(
                 alert_id=alert_id, admin_user_id=1, note="Reviewed by admin"
             )
             is True
         )
 
         reviewed = next(
-            a for a in db.get_all_alerts(admin_user_id=1) if a["alert_id"] == alert_id
+            a for a in alerts.get_all_alerts(admin_user_id=1) if a["alert_id"] == alert_id
         )
         assert reviewed["status"] == "reviewed"
         assert reviewed["reviewed_by"] == 1
 
         assert (
-            db.close_alert(alert_id=alert_id, admin_user_id=1, note="No further action")
+            alerts.close_alert(alert_id=alert_id, admin_user_id=1, note="No further action")
             is True
         )
 
         # Verify no longer in open alerts
-        remaining_open = db.get_open_alerts(admin_user_id=1)
+        remaining_open = alerts.get_open_alerts(admin_user_id=1)
         assert not any(a["alert_id"] == alert_id for a in remaining_open)
 
     def test_non_admin_cannot_read_security_alerts(self, test_db):
-        db.raise_alert(
+        alerts.raise_alert(
             user_id=2, alert_type="Test", description="sensitive", severity="medium"
         )
-        assert db.get_all_alerts(admin_user_id=2) == []
-        assert db.get_open_alerts(admin_user_id=2) == []
+        assert alerts.get_all_alerts(admin_user_id=2) == []
+        assert alerts.get_open_alerts(admin_user_id=2) == []

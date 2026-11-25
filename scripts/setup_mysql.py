@@ -9,7 +9,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pymysql
-import config
+from bank import config
 
 
 def main():
@@ -44,7 +44,7 @@ def main():
     cur = conn.cursor()
 
     # 3. Ensure schema tables exist (Users, Accounts, Transactions, Audit_Log, Alerts)
-    import db
+    from bank import db
 
     db.init_db()
     print("Application schema & seed verified.")

@@ -19,8 +19,7 @@ import subprocess
 import tempfile
 from datetime import datetime
 
-import db
-import config
+from bank import config, db
 
 BACKUP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
 

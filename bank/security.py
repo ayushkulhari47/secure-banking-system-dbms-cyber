@@ -1,16 +1,13 @@
 """
-security.py  Input validation, password policy, and session helpers.
+bank/security.py -- Input validation, password policy, session timeout, and intrusion helpers.
 
-All vulnerability-fix logic lives here so it can be imported by app.py
-and independently unit-tested in tests/test_security_fixes.py.
-
-Controls implemented (maps to Phase 3 control_mapping.md):
-  SEC-01  validate_amount()    -- rejects zero, negative, NaN, infinite
-  SEC-02  safe_float_input()   -- wraps input() so bad input never crashes
-  SEC-03  safe_int_input()     -- same for integers
+Controls implemented:
+  SEC-01  validate_amount()       -- rejects zero, negative, NaN, infinite
+  SEC-02  safe_float_input()      -- wraps input() so bad input never crashes
+  SEC-03  safe_int_input()        -- same for integers
   SEC-04  password_meets_policy() -- minimum complexity enforcement
-  SEC-05  is_session_expired() -- inactivity timeout detection
-  SEC-06  self-transfer guard  -- checked in app.py using account IDs
+  SEC-05  Session                 -- inactivity timeout detection
+  SEC-07  detect_sqli() / check_velocity() / is_odd_hour()
 """
 
 import math
@@ -18,7 +15,7 @@ import re
 import time
 from typing import Optional
 
-from config import (
+from bank.config import (
     MIN_AMOUNT,
     MAX_AMOUNT,
     SESSION_TIMEOUT_SECONDS,
@@ -39,12 +36,6 @@ def validate_amount(amount: float) -> tuple:
       - Not infinite
       - Greater than MIN_AMOUNT (blocks zero and negative values)
       - Not greater than MAX_AMOUNT (blocks unrealistic inputs)
-
-    Why this matters (interview answer):
-      In the original code a negative transfer of e.g. -5000 would *add* money
-      to the sender and *remove* money from the receiver -- a real money-theft
-      exploit.  The DB CHECK(amount > 0) is a second line of defence but we
-      reject at the application layer first so the user gets a clear error.
     """
     if math.isnan(amount):
         return False, "Amount must be a valid number (NaN rejected)."
@@ -69,8 +60,6 @@ def safe_float_input(prompt: str) -> Optional[float]:
     Display prompt, read a line, and return a float.
     Returns None if the input cannot be converted -- the caller decides
     what to do (typically print an error and return without crashing).
-
-    Replaces bare float(input(...)) calls which crash on non-numeric input.
     """
     raw = input(prompt).strip()
     try:
@@ -113,9 +102,6 @@ def password_meets_policy(password: str) -> tuple:
       - At least one lowercase letter
       - At least one digit
       - At least one special character from: !@#$%^&*()-_=+[]{}|;:',.<>?/`~
-
-    Note: This function is called during account creation and password change.
-    Demo seeds bypass this check intentionally (they are labelled demo creds).
     """
     violations = []
 
@@ -146,17 +132,6 @@ def password_meets_policy(password: str) -> tuple:
 class Session:
     """
     Tracks the time of the last user interaction.
-
-    Usage in app.py:
-        session = Session()
-        # in menu loop:
-        if session.is_expired():
-            logout()
-        session.refresh()  # call after every valid action
-
-    Why this matters:
-      Without a timeout an unattended logged-in terminal is an open door.
-      ISO 27001 A.9.4.2 requires automatic session termination after inactivity.
     """
 
     def __init__(self, timeout_seconds: int = SESSION_TIMEOUT_SECONDS) -> None:
@@ -197,18 +172,6 @@ VELOCITY_MAX_TRANSACTIONS: int = 10  # alert if exceeded in window
 def detect_sqli(user_input: str) -> bool:
     """
     Return True if the string matches common SQL injection patterns.
-
-    This is an INPUT VALIDATION defence-in-depth layer.  Parameterised queries
-    in db.py are the primary protection; this detector provides an early-warning
-    signal for the Alerts table (ISO 27001:2022 A.8.16 -- Monitoring Activities).
-
-    Patterns checked:
-      - Classic OR/AND tautologies:  ' OR 1=1 --
-      - UNION-based extraction:      UNION SELECT ...
-      - Comment sequences:           --, /* */
-      - Time-based blind:            SLEEP(), WAITFOR DELAY
-      - Stacked queries:             ; DROP TABLE
-      - Stored procedure calls:      xp_cmdshell, EXEC()
     """
     return bool(_SQLI_PATTERNS.search(user_input))
 
@@ -220,21 +183,7 @@ def check_velocity(
 ) -> tuple:
     """
     Detect abnormally high transaction velocity (ISO 27001:2022 A.8.16).
-
-    Args:
-        transaction_times: List of float timestamps (time.monotonic()) for
-                           recent transactions by one user / account.
-        window_seconds:    Rolling window to count within (default: 60 s).
-        max_allowed:       Maximum transactions permitted in window (default: 10).
-
-    Returns:
-        (True, count)   if velocity exceeds threshold -- caller should raise alert.
-        (False, count)  if within normal bounds.
-
-    Why this matters:
-        Card-skimmer or automated fraud scripts submit dozens of transactions
-        per minute.  A velocity rule is a lightweight, first-line detector that
-        can freeze an account before significant loss occurs.
+    Returns (True, count) if velocity exceeds threshold, else (False, count).
     """
     now = time.monotonic()
     cutoff = now - window_seconds
@@ -246,14 +195,10 @@ def check_velocity(
 
 
 def is_odd_hour(timestamp=None) -> bool:
-    """Return True for transactions submitted during the configured quiet hours.
-
-    The default rule treats 23:00 through 05:59 UTC as an unusual hour. The
-    caller can pass a timezone-aware ``datetime`` in tests or deployments that
-    use a local business timezone.
-    """
+    """Return True for transactions submitted during the configured quiet hours (23:00-05:59 UTC)."""
     from datetime import datetime, timezone
 
     moment = timestamp or datetime.now(timezone.utc)
     hour = moment.hour
     return hour >= 23 or hour < 6
+

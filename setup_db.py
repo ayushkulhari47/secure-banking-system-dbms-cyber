@@ -28,8 +28,7 @@ DB_TYPE must be set to 'mysql' for this script to connect.
 import os
 import sys
 import pymysql
-import config
-import db
+from bank import config, db
 
 # ---------------------------------------------------------------------------
 # Helper: raw PyMySQL connection (autocommit=True for DDL)

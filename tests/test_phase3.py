@@ -2,10 +2,10 @@
 tests/test_phase3.py  Phase 3 control-testing evidence.
 
 Covers:
-  - TestChangePassword    db.change_password() -- policy, auth, atomic update
+  - TestChangePassword    auth.change_password() -- policy, auth, atomic update
   - TestSQLiDetection     security.detect_sqli() -- injection pattern detection
   - TestVelocityDetection security.check_velocity() -- transaction rate limiting
-  - TestTransferAtomic    db.transfer() -- rollback on error, self-transfer guard
+  - TestTransferAtomic    transactions.transfer() -- rollback on error, self-transfer guard
   - TestAmountsRejected   validate_amount() edge cases via db.deposit/withdraw
 
 Run: pytest tests/test_phase3.py -v
@@ -16,9 +16,8 @@ import pytest
 import bcrypt
 from datetime import datetime, timezone
 
-import db
-import security
-from security import validate_amount, detect_sqli, check_velocity
+from bank import auth, db, security, transactions
+from bank.security import validate_amount, detect_sqli, check_velocity
 
 # ---------------------------------------------------------------------------
 # Shared fixture -- hermetic SQLite database
@@ -56,33 +55,33 @@ class TestChangePassword:
         conn.execute("DELETE FROM Users WHERE email = 'changeme@test.com'")
         conn.execute(
             "INSERT INTO Users (name, email, password_hash, role) VALUES (?, ?, ?, ?)",
-            ("Tester", "changeme@test.com", db.hash_password("OldPass1!"), "user"),
+            ("Tester", "changeme@test.com", auth.hash_password("OldPass1!"), "user"),
         )
         conn.execute(
             "INSERT INTO Accounts (user_id, balance) VALUES (last_insert_rowid(), 0)"
         )
         conn.close()
 
-        user = db.get_user_by_email("changeme@test.com")
-        ok, err = db.change_password(user["user_id"], "OldPass1!", "NewPass2@")
+        user = auth.get_user_by_email("changeme@test.com")
+        ok, err = auth.change_password(user["user_id"], "OldPass1!", "NewPass2@")
         assert ok is True
         assert err is None
 
         # New hash must verify
-        updated = db.get_user_by_email("changeme@test.com")
+        updated = auth.get_user_by_email("changeme@test.com")
         assert bcrypt.checkpw(b"NewPass2@", updated["password_hash"].encode())
 
     def test_wrong_old_password_rejected(self, test_db):
         """Wrong current password must be rejected."""
-        user = db.get_user_by_email("rahul@bank.com")
-        ok, err = db.change_password(user["user_id"], "wrongpassword", "NewPass2@")
+        user = auth.get_user_by_email("rahul@bank.com")
+        ok, err = auth.change_password(user["user_id"], "wrongpassword", "NewPass2@")
         assert ok is False
         assert "incorrect" in err.lower()
 
     def test_weak_new_password_rejected(self, test_db):
         """New password that fails policy must be rejected."""
-        user = db.get_user_by_email("rahul@bank.com")
-        ok, err = db.change_password(user["user_id"], "rahul123", "weak")
+        user = auth.get_user_by_email("rahul@bank.com")
+        ok, err = auth.change_password(user["user_id"], "rahul123", "weak")
         assert ok is False
         assert "policy" in err.lower() or "password" in err.lower()
 
@@ -91,18 +90,18 @@ class TestChangePassword:
         conn = db.get_connection()
         conn.execute(
             "UPDATE Users SET password_hash = ? WHERE email = ?",
-            (db.hash_password("SamePass1!"), "priya@bank.com"),
+            (auth.hash_password("SamePass1!"), "priya@bank.com"),
         )
         conn.close()
 
-        user = db.get_user_by_email("priya@bank.com")
-        ok, err = db.change_password(user["user_id"], "SamePass1!", "SamePass1!")
+        user = auth.get_user_by_email("priya@bank.com")
+        ok, err = auth.change_password(user["user_id"], "SamePass1!", "SamePass1!")
         assert ok is False
         assert "different" in err.lower()
 
     def test_nonexistent_user_rejected(self, test_db):
         """Non-existent user_id must be handled gracefully."""
-        ok, err = db.change_password(9999, "anything", "NewPass2@")
+        ok, err = auth.change_password(9999, "anything", "NewPass2@")
         assert ok is False
         assert "not found" in err.lower()
 
@@ -111,55 +110,55 @@ class TestChangePassword:
         conn = db.get_connection()
         conn.execute(
             "UPDATE Users SET password_hash = ? WHERE email = ?",
-            (db.hash_password("OldPass1!"), "ayush@bank.com"),
+            (auth.hash_password("OldPass1!"), "ayush@bank.com"),
         )
         conn.close()
 
-        user = db.get_user_by_email("ayush@bank.com")
-        db.change_password(user["user_id"], "OldPass1!", "NewStrong2@")
+        user = auth.get_user_by_email("ayush@bank.com")
+        auth.change_password(user["user_id"], "OldPass1!", "NewStrong2@")
 
-        updated = db.get_user_by_email("ayush@bank.com")
+        updated = auth.get_user_by_email("ayush@bank.com")
         assert not bcrypt.checkpw(b"OldPass1!", updated["password_hash"].encode())
         assert bcrypt.checkpw(b"NewStrong2@", updated["password_hash"].encode())
 
     def test_app_change_password_mismatch(self, test_db, monkeypatch, capsys):
         """app.do_change_password must abort if confirm password does not match."""
-        import app
+        import main
         import getpass
 
         session = security.Session()
         inputs = iter(["Current1!", "NewPass1!", "MismatchPass2!"])
         monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(inputs))
 
-        app.do_change_password(1, session)
+        main.do_change_password(1, session)
         captured = capsys.readouterr().out
         assert "passwords do not match" in captured.lower()
 
     def test_app_change_password_success(self, test_db, monkeypatch, capsys):
         """app.do_change_password executes and refreshes session on success."""
-        import app
+        import main
         import getpass
 
         session = security.Session()
         inputs = iter(["ayush123", "NewSecure1@Pass", "NewSecure1@Pass"])
         monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(inputs))
 
-        user = db.get_user_by_email("ayush@bank.com")
-        app.do_change_password(user["user_id"], session)
+        user = auth.get_user_by_email("ayush@bank.com")
+        main.do_change_password(user["user_id"], session)
         captured = capsys.readouterr().out
         assert "password changed successfully" in captured.lower()
 
     def test_app_change_password_wrong_old(self, test_db, monkeypatch, capsys):
         """app.do_change_password reports error when old password is wrong."""
-        import app
+        import main
         import getpass
 
         session = security.Session()
         inputs = iter(["WrongOld123!", "NewSecure1@Pass", "NewSecure1@Pass"])
         monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(inputs))
 
-        user = db.get_user_by_email("ayush@bank.com")
-        app.do_change_password(user["user_id"], session)
+        user = auth.get_user_by_email("ayush@bank.com")
+        main.do_change_password(user["user_id"], session)
         captured = capsys.readouterr().out
         assert "password change failed" in captured.lower()
 
@@ -232,13 +231,13 @@ class TestAuthenticationPrivacy:
     """Login errors must not reveal whether an email exists."""
 
     def test_unknown_email_uses_generic_message(self, test_db, monkeypatch, capsys):
-        import app
+        import main
         import getpass
 
         monkeypatch.setattr("builtins.input", lambda prompt: "unknown@example.com")
         monkeypatch.setattr(getpass, "getpass", lambda prompt="": "WrongPass1!")
 
-        assert app.login() == (None, None)
+        assert main.login() == (None, None)
         output = capsys.readouterr().out.lower()
         assert "invalid email or password" in output
         assert "user not found" not in output
@@ -317,37 +316,37 @@ class TestVelocityDetection:
 
 class TestTransferAtomic:
     """
-    Control: db.transfer() is atomic with ROLLBACK -- balances are never
+    Control: transactions.transfer() is atomic with ROLLBACK -- balances are never
     partially updated on error.
     """
 
     def test_transfer_success_balances_conserved(self, test_db):
         """After a successful transfer, total money in system is unchanged."""
-        acc1 = db.get_account_by_user(1)
-        acc2 = db.get_account_by_user(2)
+        acc1 = transactions.get_account_by_user(1)
+        acc2 = transactions.get_account_by_user(2)
         total_before = acc1["balance"] + acc2["balance"]
 
         amount = 100.00
-        ok = db.transfer(acc1["account_id"], acc2["account_id"], amount)
+        ok = transactions.transfer(acc1["account_id"], acc2["account_id"], amount)
         assert ok is True
 
-        acc1_after = db.get_account_by_user(1)
-        acc2_after = db.get_account_by_user(2)
+        acc1_after = transactions.get_account_by_user(1)
+        acc2_after = transactions.get_account_by_user(2)
         assert acc1_after["balance"] == acc1["balance"] - amount
         assert acc2_after["balance"] == acc2["balance"] + amount
         assert acc1_after["balance"] + acc2_after["balance"] == total_before
 
     def test_transfer_insufficient_balance_returns_false(self, test_db):
         """Insufficient funds return False and leave balances unchanged."""
-        acc1 = db.get_account_by_user(1)
-        acc2 = db.get_account_by_user(2)
+        acc1 = transactions.get_account_by_user(1)
+        acc2 = transactions.get_account_by_user(2)
 
-        ok = db.transfer(acc1["account_id"], acc2["account_id"], 999_999.00)
+        ok = transactions.transfer(acc1["account_id"], acc2["account_id"], 999_999.00)
         assert ok is False
 
         # Balances must be unchanged
-        assert db.get_account_by_user(1)["balance"] == acc1["balance"]
-        assert db.get_account_by_user(2)["balance"] == acc2["balance"]
+        assert transactions.get_account_by_user(1)["balance"] == acc1["balance"]
+        assert transactions.get_account_by_user(2)["balance"] == acc2["balance"]
 
     def test_validate_amount_blocks_zero(self):
         """Amount = 0 must be rejected by validate_amount before reaching db."""

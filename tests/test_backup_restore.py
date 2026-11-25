@@ -4,7 +4,7 @@ import hashlib
 import subprocess
 
 import backup_restore
-import db
+from bank import db, transactions
 
 
 def _sha256(path):
@@ -22,7 +22,7 @@ def test_backup_and_restore_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(backup_restore, "BACKUP_DIR", str(tmp_path / "backups"))
     db.init_db()
 
-    original = db.get_account_by_id(1)["balance"]
+    original = transactions.get_account_by_id(1)["balance"]
     backup_path = backup_restore.perform_backup()
 
     conn = db.get_connection()
@@ -30,7 +30,7 @@ def test_backup_and_restore_round_trip(tmp_path, monkeypatch):
     conn.close()
 
     assert backup_restore.restore_backup(backup_path) is True
-    assert db.get_account_by_id(1)["balance"] == original
+    assert transactions.get_account_by_id(1)["balance"] == original
 
 
 def test_restore_requires_checksum_sidecar(tmp_path, monkeypatch):
