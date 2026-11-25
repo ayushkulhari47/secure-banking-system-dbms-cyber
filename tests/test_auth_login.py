@@ -5,6 +5,8 @@ exercising the real main.login() and auth.authenticate() flow.
 
 import getpass
 from pathlib import Path
+import re
+import bcrypt
 import pytest
 
 import main
@@ -51,6 +53,35 @@ def _attempt_login(monkeypatch, capsys, email: str, password: str):
 
 class TestLoginHardening:
     """Verify constant-work bcrypt verification, generic errors, and lockout."""
+
+    def test_dummy_password_hash_is_valid_bcrypt_format(self):
+        expected_prefix = f"$2b${config.BCRYPT_ROUNDS:02d}$"
+        assert auth.DUMMY_PASSWORD_HASH.startswith(expected_prefix)
+        assert len(auth.DUMMY_PASSWORD_HASH) == 60
+        assert re.fullmatch(
+            r"\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}", auth.DUMMY_PASSWORD_HASH
+        )
+        assert bcrypt.checkpw(b"any-probe-password", auth.DUMMY_PASSWORD_HASH.encode()) is False
+
+    def test_unknown_email_executes_real_bcrypt_checkpw(
+        self, auth_db, monkeypatch, capsys
+    ):
+        checkpw_calls = []
+        orig_checkpw = bcrypt.checkpw
+
+        def spy_checkpw(plain_bytes, hash_bytes):
+            res = orig_checkpw(plain_bytes, hash_bytes)
+            checkpw_calls.append((hash_bytes.decode(), res))
+            return res
+
+        monkeypatch.setattr(bcrypt, "checkpw", spy_checkpw)
+
+        result, out = _attempt_login(
+            monkeypatch, capsys, "unknown-user@test.local", "AnyPass@123"
+        )
+        assert result == (None, None)
+        assert out == "Invalid email or password."
+        assert checkpw_calls == [(auth.DUMMY_PASSWORD_HASH, False)]
 
     def test_login_uses_bcrypt_verification_and_succeeds(
         self, auth_db, monkeypatch, capsys

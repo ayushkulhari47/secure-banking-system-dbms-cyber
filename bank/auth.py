@@ -21,8 +21,10 @@ def hash_password(plaintext: str) -> str:
 
 
 # Used only to equalize the work performed for an unknown email during login.
-# Generated randomly at startup; never accepted as a real credential or stored.
-DUMMY_PASSWORD_HASH = hash_password(secrets.token_hex(32))
+# Generated at runtime from random bytes with BCRYPT_ROUNDS; never stored or accepted.
+DUMMY_PASSWORD_HASH = bcrypt.hashpw(
+    secrets.token_bytes(32), bcrypt.gensalt(rounds=BCRYPT_ROUNDS)
+).decode()
 
 
 def get_user_by_email(email: str):
