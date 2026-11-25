@@ -1,38 +1,21 @@
-Testing Proof - Secure Banking System
+# Testing Proof (Historical Phase 0 Note + Current Test Suite)
 
-All tests were performed on db-fiddle for SQL and onecompiler for Python.
+> [!NOTE]
+> The screenshots `test1.png`–`test5.png` in this folder were captured during the earliest initial prototype stage (when a single script tested basic SQL/Python behavior on online sandboxes). Since then, the codebase was refactored into `main.py` and the `bank/` package with `bcrypt` authentication, generic `"Invalid email or password."` login failures, `Decimal` money handling, data-layer RBAC, atomic audit logging/triggers, and Maker-Checker hardening.
 
-Test 1 - Users and Balances
-Query used: SELECT u.name, u.email, u.role, a.balance FROM Users u JOIN Accounts a ON u.user_id = a.user_id
-Result: All 3 users showing correctly with their balances
-Ayush Kulhari - admin - Rs50000
-Rahul Sharma - user - Rs25000
-Priya Singh - user - Rs15000
-Screenshot: test1.png
+## Current Automated Verification
 
-Test 2 - Transaction History
-Query used: SELECT * FROM Transactions
-Result: All 3 transactions recorded correctly
-Transfer of Rs5000 from account 2 to account 1
-Deposit of Rs10000 to account 1
-Withdrawal of Rs2000 from account 3
-Screenshot: test2.png
+Run the active automated suite locally via:
 
-Test 3 - Login and Banking Menu
-Result: Login worked successfully with correct credentials
-Welcome message showed with correct role
-All 8 menu options displayed correctly
-Balance showed as Rs50000
-Screenshot: test3.png
+```bash
+python -m pytest tests/ -v
+```
 
-Test 4 - Brute Force Detection
-Result: Wrong password attempt was detected immediately
-System showed "Wrong password! Attempt 1/3"
-On 3rd attempt account gets locked and alert is raised
-Screenshot: test4.png
+Current working-copy verification executes **240 automated `pytest` tests** across SQLite test databases (and mocked `mysql-connector-python` tests):
+- `tests/test_database.py`, `tests/test_security_fixes.py`, `tests/test_cyber_controls.py`, `tests/test_phase3.py`
+- `tests/test_config_db.py`, `tests/test_auth_login.py`, `tests/test_rbac_data_layer.py`
+- `tests/test_decimal_money.py`, `tests/test_atomic_transfers.py`, `tests/test_atomic_audit.py`
+- `tests/test_audit_triggers.py`, `tests/test_intrusion_and_unlock.py`, `tests/test_maker_checker.py`
+- `tests/test_backup_restore.py`
 
-Test 5 - GitHub Repository (historical evidence)
-Result: Repository structure was visible in the earlier screenshot; this does not prove the current unpushed branch.
-docs folder, sql folder, app.py and README all present
-12 commits showing project development history
-Screenshot: test5.png
+*(Live MySQL execution was not tested in this environment.)*

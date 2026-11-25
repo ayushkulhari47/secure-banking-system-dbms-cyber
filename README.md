@@ -2,357 +2,300 @@
 
 [![Tests](https://github.com/ayushkulhari47/secure-banking-system-dbms-cyber/actions/workflows/tests.yml/badge.svg)](https://github.com/ayushkulhari47/secure-banking-system-dbms-cyber/actions/workflows/tests.yml)
 [![Status](https://img.shields.io/badge/Status-Educational%20Prototype-yellow.svg)](#)
-[![Compliance](https://img.shields.io/badge/Compliance-ISO%2027001%20%7C%20DPDP%202023-blue.svg)](docs/control_mapping.md)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](#)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A hardened, transactional banking core and cybersecurity compliance demonstration built in Python with SQLite and an explicitly configured MySQL path. The project simulates a resilient retail banking ledger incorporating multi-layer defense-in-depth, cryptographic credential protection via salted `bcrypt`, role-based access control (RBAC), monotonic session inactivity timeouts, Maker-Checker dual authorization for high-value fund movements, and a tamper-evident audit trail secured by cryptographic SHA-256 hash chaining. It is an educational prototype, not production banking software.
+An educational command-line banking ledger and security-controls prototype written in Python. It models core retail banking operations (deposits, withdrawals, transfers, balance lookups, and transaction history) alongside database-backed security controls including `bcrypt` password hashing, brute-force account lockout, data-layer role-based access control (RBAC), exact `Decimal` currency arithmetic, atomic transactions, Maker-Checker dual control for transfers above a configured threshold, a SHA-256 hash-chained `Audit_Log` protected by SQL triggers, automated security alerts, and SQLite hot backup/restore utilities.
+
+> [!NOTE]
+> This is an **educational prototype**, not a real banking system or production financial software. Live MySQL execution was **not** tested in this environment (see [Known Limitations](#known-limitations)).
 
 ---
 
-## 1. Security Features Table
+## What the Application Does
 
-| Feature | What It Does | Control Type | Implementation (File & Function) |
-|---|---|---|---|
-| **SQL Injection Defense** | Eliminates SQLi vulnerabilities by enforcing parameterized queries (`?`) across all database operations. | **Preventive** | [db.py](db.py) (All SQL queries) |
-| **Bcrypt Password Hashing** | Replaces unsalted hashes with salted `bcrypt` (work factor 12), generating unique random 16-byte salts per credential to defeat rainbow tables. | **Preventive** | [db.py:hash_password](db.py#L172), `verify_password` |
-| **Password Policy Enforcement** | Requires minimum 8 characters, uppercase, lowercase, numbers, and special symbols for user credentials. | **Preventive** | [security.py:password_meets_policy](security.py#L101) |
-| **Brute-Force Account Lockout** | Automatically locks accounts after 3 consecutive failed login attempts (`MAX_FAILED_LOGINS`) and persists state in the database. | **Preventive** | [db.py:increment_failed_attempts](db.py#L210), [app.py:login](app.py#L34) |
-| **Amount Bounds Validation** | Application and database-layer bounds checking (`0.01 <= amount <= 1,000,000.00`) rejecting zero, negative, NaN, and infinite inputs. | **Preventive** | [security.py:validate_amount](security.py#L35), [db.py:SCHEMA_SQL](db.py#L69) |
-| **Safe Input Exception Handling** | Wraps user CLI input conversion in structured exception blocks, preventing application crashes on non-numeric inputs. | **Preventive** | [security.py:safe_float_input](security.py#L68), `safe_int_input` |
-| **Self-Transfer Restriction** | Intercepts attempts to transfer funds to one's own account, preventing artificial audit trail inflation. | **Preventive** | [app.py:do_transfer](app.py#L174) |
-| **Inactivity Session Timeout** | Enforces automatic session termination and logout after 300 seconds of inactivity using monotonic system clocks. | **Preventive** | [security.py:Session](security.py#L141), [app.py:menu](app.py#L457) |
-| **Role-Based Access Control (RBAC)** | Restricts transaction history to account owners; reserves audit logs, alert consoles, and approval queues strictly to administrators. | **Preventive** | [app.py:view_transactions](app.py#L241), [app.py:view_audit_log](app.py#L270), [app.py:view_alerts](app.py#L287) |
-| **Maker-Checker Dual Control** | Quarantines transfers > Rs 50,000 in `pending` state; enforces Segregation of Duties (maker is barred from self-approving). | **Preventive** | [db.py:create_pending_transfer](db.py#L628), `approve_pending_transfer`, [app.py:do_transfer](app.py#L198) |
-| **Centralized Security Configuration** | Consolidates all operational thresholds in an auditable configuration module to avoid magic numbers. | **Preventive** | [config.py](config.py) |
-| **Comprehensive Event Logging** | Logs all security-relevant events, logins (including unknown emails), financial operations, and administrative overrides. | **Detective** | [db.py:log_action](db.py#L280) |
-| **Tamper-Evident Audit Hash Chain** | Links audit log entries via SHA-256 hash chaining (`previous_hash` & `entry_hash`), enabling cryptographic proof of record integrity. | **Detective** | [db.py:compute_audit_hash](db.py#L271), `verify_audit_log_integrity` |
-| **Automated Security Alerting** | Raises categorized security alerts with severity ratings (`low`, `medium`, `high`) on brute force and high-value movements. | **Detective** | [db.py:raise_alert](db.py#L380), [app.py](app.py) |
-| **Admin Account Unlock** | Provides authorized administrators with a corrective remediation function to unlock locked accounts and reset counters. | **Corrective** | [db.py:unlock_user](db.py#L357), [app.py:manage_locked_users](app.py#L362) |
-| **Security Alert Remediation** | Enables administrators to investigate incidents and transition alerts through `open` → `reviewed` → `closed` with attribution. | **Corrective** | [db.py:review_alert](db.py), [db.py:close_alert](db.py), [app.py:manage_alerts](app.py) |
+The interactive CLI ([`main.py`](main.py)) authenticates users against the `Users` table and opens a role-scoped session with a 300-second monotonic inactivity timeout:
 
----
-
-## 2. Architecture
-
-```mermaid
-graph TD
-    subgraph Users & Interfaces
-        U[Standard Customer] -->|CLI Menu 1-5| CLI[app.py CLI Interface]
-        A[Administrator / Checker] -->|CLI Menu 1-11| CLI
-    end
-
-    subgraph Application & Security Controls
-        CLI --> SEC[security.py<br>Amount Validation<br>Safe Input Wrappers<br>Password Policy<br>Session Inactivity Clock]
-        CLI --> CFG[config.py<br>Centralized Thresholds<br>Lockout / Dual Control Caps]
-    end
-
-    subgraph Data & Persistence Layer
-        CLI --> DB[db.py Database Engine]
-        DB --> TXN[(SQLite: banking.db<br>ACID Transactions<br>CHECK Constraints)]
-        DB --> HASH[Cryptographic Engine<br>bcrypt Credential Hasher<br>SHA-256 Audit Hash Chainer]
-    end
-
-    subgraph Audit & Incident Governance
-        DB --> AUDIT[(Audit_Log Table<br>previous_hash + entry_hash)]
-        DB --> ALERTS[(Alerts Table<br>Severity & Status)]
-        HASH -->|Verify Chain Integrity| AUDIT
-        CLI -->|Remediation & Approval| ALERTS
-    end
-```
+- **Standard users (`role='user'`)** can:
+  - View their own account balance (`view_balance`)
+  - Deposit funds into their own account (`do_deposit`)
+  - Withdraw funds from their own account (`do_withdraw`), respecting pending outgoing transfer reserves
+  - Transfer funds to another account (`do_transfer`) with self-transfer blocking:
+    - Amounts `<= LARGE_TXN_THRESHOLD` (`Rs 50,000.00`) execute immediately and atomically
+    - Amounts `> LARGE_TXN_THRESHOLD` create a `pending` Maker-Checker transfer without moving balances immediately
+  - View transaction history for their own account (`view_transactions`)
+  - Change their own password (`do_change_password`), subject to password complexity rules
+- **Administrators (`role='admin'`)** have all user actions on their own account plus admin consoles for:
+  - Viewing recent audit logs (`Audit_Log`)
+  - Triaging and resolving security alerts (`open` -> `reviewed` -> `closed`)
+  - Approving or rejecting `pending` Maker-Checker transfers (blocking non-admins, the transfer maker, and an admin recipient)
+  - Listing and unlocking brute-force-locked user accounts (`is_locked = 0`, `failed_attempts = 0`)
+  - Verifying the SHA-256 hash chain integrity across `Audit_Log`
 
 ---
 
-## 3. Tech Stack
+## Security & DBMS Features
 
-- **Core Programming Language:** Python 3.10+ (tested on Python 3.14)
-- **Database Engine:** SQLite 3 for the hermetic test path and MySQL 8+ for the provisioned runtime path. A MySQL failure is fatal; the application never silently changes database engines.
-- **Authentication & Cryptography:** `bcrypt>=4.0.0` (adaptive work factor 12), `hashlib` (SHA-256 hash chaining)
-- **Testing Framework:** `pytest` (123 automated unit, integration, and control tests in the current working copy)
-- **CI/CD Pipeline:** GitHub Actions
+| Feature | Implementation & Behavior | Code Location |
+|---|---|---|
+| **bcrypt Authentication** | Salted `bcrypt` hashing (`BCRYPT_ROUNDS = 12`); constant-work verification including a runtime random dummy hash (`DUMMY_PASSWORD_HASH`) for unknown emails and generic `"Invalid email or password."` failure messages. | [`bank/auth.py`](bank/auth.py) |
+| **Three-Attempt Lockout** | Consecutive failed logins increment `Users.failed_attempts`; on the 3rd failure (`MAX_FAILED_LOGINS = 3`), sets `is_locked = 1` and raises one high-severity `"Brute Force"` alert atomically. | [`bank/auth.py`](bank/auth.py), [`bank/config.py`](bank/config.py) |
+| **RBAC & Ownership Enforcement** | Enforced both in the CLI and inside [`bank/`](bank/) data-layer functions (`get_account_by_id`, `get_transactions_for_account`, `deposit`, `withdraw`, `transfer`, `create_pending_transfer`, `change_password`, audit, alerts, unlock, approvals). | [`bank/transactions.py`](bank/transactions.py), [`bank/auth.py`](bank/auth.py), [`bank/audit.py`](bank/audit.py), [`bank/alerts.py`](bank/alerts.py) |
+| **Decimal Money Handling** | Uses Python `Decimal` (`Decimal("0.01")` precision) end-to-end with `DECIMAL(12,2)` SQL columns and SQLite `CHECK(ROUND(balance, 2) = balance)` / `CHECK(ROUND(amount, 2) = amount)`. Rejects booleans, non-numeric strings, `NaN`, `Infinity`, `<= 0`, `> 2` decimal places, and `> MAX_AMOUNT`. | [`bank/security.py`](bank/security.py), [`bank/transactions.py`](bank/transactions.py), [`bank/db.py`](bank/db.py) |
+| **Atomic Transactions** | Explicit `BEGIN IMMEDIATE` (SQLite) and `BEGIN` + `SELECT ... FOR UPDATE` in deterministic `account_id` order (MySQL), with safe rollback on error so partial debits/credits, transactions, audit entries, or alerts cannot persist. | [`bank/db.py`](bank/db.py), [`bank/transactions.py`](bank/transactions.py) |
+| **Maker-Checker Transfers** | Transfers strictly above `LARGE_TXN_THRESHOLD` (`Rs 50,000.00`) enter `'pending'`, reserve outgoing funds in available-balance calculations, bar non-admins, the maker, and any recipient admin from approving, re-verify available balance at approval, and release reserves on rejection. Deposits and withdrawals do not use Maker-Checker. | [`bank/transactions.py`](bank/transactions.py), [`main.py`](main.py) |
+| **Audit Hash Chain** | Every `Audit_Log` row links `previous_hash` (starting from 64 zeroes `GENESIS_HASH`) to `entry_hash = SHA-256(previous_hash\|user_id\|action\|log_time)` inside the enclosing DB transaction, failing closed if the chain tail is corrupt or missing hashes. | [`bank/audit.py`](bank/audit.py) |
+| **Append-Only `Audit_Log` Triggers** | SQLite and MySQL triggers (`after_accounts_balance_update`, `prevent_audit_log_update`, `prevent_audit_log_delete`) automatically hash-chain every `Accounts.balance` update and block `UPDATE` / `DELETE` on `Audit_Log`. | [`bank/db.py`](bank/db.py), [`sql/triggers.sql`](sql/triggers.sql) |
+| **Large-Transaction Alerts** | High-severity `"Large Transaction"` alerts are created atomically inside the same DB transaction for successful deposits, withdrawals, and transfer requests strictly above `LARGE_TXN_THRESHOLD`; failed/rolled-back calls create no alerts. | [`bank/transactions.py`](bank/transactions.py), [`bank/alerts.py`](bank/alerts.py) |
+| **Admin Unlock** | Only administrators can list locked accounts and unlock them (`unlock_user`), clearing `is_locked = 0`, resetting `failed_attempts = 0`, and recording an audit entry. | [`bank/auth.py`](bank/auth.py), [`main.py`](main.py) |
 
 ---
 
-## 4. Folder Structure
+## Project Structure
 
 ```text
-secure-banking-system/
-├── .github/
-│   └── workflows/
-│       └── tests.yml             # Automated CI workflow executing pytest on push
-├── docs/
-│   ├── control_mapping.md        # Traceability matrix mapping code controls to ISO 27001:2022
-│   ├── risk_register.md          # 5x5 IT Risk Register evaluating 10 threat scenarios
-│   ├── PIA.md                    # Privacy Impact Assessment aligned with India's DPDP Act 2023
-│   ├── bcp_dr.md                 # Business Continuity, Disaster Recovery & Incident Response SOP
-│   ├── control_testing.md        # Educational control-testing workpaper and scope limits
-│   ├── security_assessment_report.md # Vulnerability remediation audit report & evidence matrix
-│   ├── demo_script.md            # Step-by-step 2-minute interview demonstration script
-│   └── presentation_outline.md   # 5-slide presentation deck outline + 8 interview Q&As
-├── sql/
-│   ├── schema.sql                # Real SQLite DDL matching db.py SCHEMA_SQL (authoritative)
-│   ├── procedures.sql            # Legacy MySQL stored procedures (reference only, not used)
-│   ├── triggers.sql              # Legacy MySQL triggers (reference only, not used)
-│   └── queries.sql               # Diagnostic SQL queries + legacy MySQL seed (reference only)
-├── tests/
+secure-banking-system-dbms-cyber/
+├── .github/workflows/tests.yml   # GitHub Actions pytest CI (Python 3.10–3.13)
+├── bank/
 │   ├── __init__.py
-│   ├── test_database.py          # 18 tests for schema constraints, ACID transactions, and rollback
-│   ├── test_security_fixes.py    # 42 tests for input safety, amount validation, bcrypt, and RBAC
-│   └── test_cyber_controls.py    # 14 tests for Maker-Checker, tamper detection, unlock, and alert resolution
-├── app.py                        # Hardened interactive CLI banking frontend and admin console
-├── backup_restore.py             # Hot-backup, SHA-256 checksum, and atomic restoration utility
-├── config.py                     # Centralized tuneable security configuration parameters
-├── db.py                         # Transactional database layer with hash-chained audit logging
-├── security.py                   # Pure security validation, safe inputs, password policy, and session
-├── requirements.txt              # Pinned external dependencies (bcrypt, pytest)
-├── .gitignore                    # Ignores runtime artifacts (banking.db, backups/, cache)
-├── LICENSE                       # MIT License
-├── SECURITY.md                   # Security vulnerability reporting policy & prototype disclaimer
-└── README.md                     # System documentation and compliance report
+│   ├── alerts.py                 # Security alert creation and open/reviewed/closed workflow
+│   ├── audit.py                  # Atomic hash-chained Audit_Log writer & integrity verifier
+│   ├── auth.py                   # bcrypt auth, dummy hash, lockout, password changes, admin unlock
+│   ├── config.py                 # Env-driven DB config & centralized Decimal/security thresholds
+│   ├── db.py                     # SQLite / mysql-connector-python abstraction, DDL, triggers
+│   ├── security.py               # Decimal validation, safe CLI inputs, password policy, Session, velocity
+│   └── transactions.py           # Ownership checks, atomic deposit/withdraw/transfer, Maker-Checker
+├── scripts/
+│   ├── seed_demo.py              # Explicit CLI script to seed demo users (no hardcoded passwords)
+│   └── setup_mysql.py            # Optional MySQL provisioning & trigger installation helper
+├── sql/
+│   ├── schema.sql                # Reference SQLite DDL & triggers matching bank/db.py
+│   ├── triggers.sql              # MySQL 8+ audit & append-only triggers matching bank/db.py
+│   ├── procedures.sql            # Reference MySQL stored procedures
+│   └── queries.sql               # Diagnostic reporting SQL queries (reference)
+├── docs/                         # Supporting design, risk, backup, and test documentation
+├── tests/                        # Automated pytest suite (240 tests)
+├── main.py                       # Interactive CLI entry point
+├── setup_db.py                   # Idempotent MySQL database, schema, trigger, and bank_app provisioner
+├── backup_restore.py             # SQLite online backup / mysqldump + SHA-256 verification utility
+├── verify_least_privilege.py     # Live MySQL runtime user privilege verification check
+├── .env.example                  # Environment variable template (placeholders only)
+├── requirements.txt              # External Python dependencies
+├── SECURITY.md                   # Security disclosure policy & prototype notice
+└── README.md
 ```
 
 ---
 
-## 5. Setup & Run Instructions
+## Installation & Environment Setup
 
-Follow these steps to run the application on a clean clone:
+### 1. Prerequisites
+- Python **3.10 or higher**
 
-### Prerequisites
-- Python 3.10 or higher installed.
+### 2. Clone and Create a Virtual Environment
 
-### Step 1: Clone Repository
 ```bash
 git clone https://github.com/ayushkulhari47/secure-banking-system-dbms-cyber.git
 cd secure-banking-system-dbms-cyber
 ```
 
-### Step 2: Create and Activate Virtual Environment
-```bash
+Create and activate a virtual environment:
+
+```powershell
 # Windows (PowerShell)
 python -m venv venv
 .\venv\Scripts\Activate.ps1
+```
 
+```bash
 # Linux / macOS
 python3 -m venv venv
 source venv/bin/activate
 ```
 
-### Step 3: Install Dependencies
+### 3. Install Dependencies
+
 ```bash
 pip install -r requirements.txt
 ```
 
-### Step 4: Choose the database engine
+[`requirements.txt`](requirements.txt) installs:
+- `bcrypt>=4.0.0,<5.0.0`
+- `pytest>=7.0.0,<10.0.0`
+- `mysql-connector-python>=8.0.0`
 
-For the default local demo, keep `DB_TYPE=sqlite` in `.env` and run:
+### 4. Configure `.env` from `.env.example`
 
-```bash
-python app.py
-```
-On first SQLite startup, `db.init_db()` creates `banking.db`, applies schema
-constraints, and seeds the dummy demo users and accounts.
-
-For MySQL, provisioning and runtime credentials are deliberately separate:
+Copy `.env.example` to `.env` (`.env` is git-ignored) and edit values as needed:
 
 ```bash
-# .env: set DB_TYPE=mysql, DB_ADMIN_USER/DB_ADMIN_PASSWORD,
-# DB_APP_PASSWORD, host, port, and database name
-python setup_db.py
-
-# Then set DB_USER=bank_app and DB_PASSWORD=<DB_APP_PASSWORD> in .env
-python verify_least_privilege.py
-python app.py
+# Linux / macOS
+cp .env.example .env
 ```
 
-The application does not create MySQL databases, run DDL, or fall back to
-SQLite when MySQL is unavailable. `setup_db.py` is the only provisioning path.
+```powershell
+# Windows (PowerShell)
+Copy-Item .env.example .env
+```
 
-### Demo Credentials (Strictly for Testing & Demonstrations)
-> [!CAUTION]
-> The credentials below are hardcoded seeds intended exclusively for interview demonstrations and local development. They must be removed before any production deployment.
-
-| Role | Name | Email | Password | Initial Balance | Account ID |
-|---|---|---|---|---|---|
-| **Admin / Checker** | Ayush Kulhari | `ayush@bank.com` | `ayush123` | Rs 50,000.00 | `1` |
-| **Standard User (Maker)** | Rahul Sharma | `rahul@bank.com` | `rahul123` | Rs 25,000.00 | `2` |
-| **Standard User** | Priya Singh | `priya@bank.com` | `priya123` | Rs 15,000.00 | `3` |
+[`bank/config.py`](bank/config.py) reads database settings strictly from environment variables (`DB_TYPE`, `DB_PATH`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`) and never ships default MySQL root credentials.
 
 ---
 
-## 6. Demo Output (Live Terminal Capture)
+## Database Setup & Demo Seeding
 
-Below is an authentic execution log captured directly from the hardened banking system demonstrating key cybersecurity controls:
+### Option A: Local SQLite Setup (Default)
 
-### Scenario A: Authentication & Standard User Session
-```text
---- Login ---
-Email: rahul@bank.com
-Password: rahul123
+Keep `DB_TYPE=sqlite` and `DB_PATH=banking.db` in `.env`, then initialize the schema and seed demo users explicitly:
 
-Welcome Rahul Sharma!  Role: user
-
---- Banking Menu (USER) --- [session expires in 5m 0s]
-1. View Balance
-2. Deposit
-3. Withdraw
-4. Transfer
-5. Transaction History
-6. Audit Log        (admin only)
-7. Security Alerts  (admin only)
-8. Logout
-
-Choose: 1
-
-Account ID: 2  |  Balance: Rs25000.00
+```bash
+python scripts/seed_demo.py
 ```
 
-### Scenario B: Negative Amount Exploit Prevention
-```text
-Choose: 4
-Enter destination account ID: 1
-Enter transfer amount (Rs): -5000
-  [!] Invalid amount: Amount must be greater than Rs0.00 (got Rs-5000.00).
-```
+`db.init_db()` creates only the schema and triggers; demo accounts are **only** created when you run `scripts/seed_demo.py`.
 
-### Scenario C: Online Brute-Force Account Lockout
-```text
-Email: priya@bank.com
-Password: wrongpassword
-Wrong password! Attempt 1/3
+You can supply passwords either via environment variables (`DEMO_ADMIN_PASSWORD`, `DEMO_RAHUL_PASSWORD`, `DEMO_PRIYA_PASSWORD` in `.env` or your shell) or enter them interactively via `getpass` when prompted. All demo passwords must satisfy `password_meets_policy()` (minimum 8 characters, uppercase, lowercase, digit, and special character).
 
-Email: priya@bank.com
-Password: wrongpassword
-Wrong password! Attempt 2/3
+### Option B: Optional MySQL Setup
 
-Email: priya@bank.com
-Password: wrongpassword
-Too many failed attempts -- your account is now locked.
+The MySQL backend uses `mysql-connector-python`. If `DB_TYPE=mysql` is configured and MySQL is unreachable or misconfigured, the application fails closed and **never** falls back to SQLite.
 
---- Verification: correct password after lockout ---
-Email: priya@bank.com
-Password: priya123
-Account is locked due to multiple failed attempts. Contact admin.
-```
-
-### Scenario D: Role-Based Access Control (RBAC) Enforcement
-```text
-Choose: 6
-  [!] Access denied -- admin only.
-Choose: 7
-  [!] Access denied -- admin only.
-```
-
-### Scenario E: Maker-Checker Dual Control on High-Value Transfer (> Rs 50,000)
-```text
-Choose: 4
-Enter destination account ID: 1
-Enter transfer amount (Rs): 60000
-
-  [!] Large Transaction Notice (Maker-Checker Control):
-      Transfer of Rs60,000.00 exceeds policy limit of Rs50,000.00.
-      Transaction #1 has been submitted with status 'pending'.
-      Dual-control policy requires an administrator/checker to approve before execution.
-
-Choose: 1
-
-Account ID: 2  |  Balance: Rs25000.00  (unchanged -- funds not deducted)
-```
-
-### Scenario F: Cryptographic Audit Log Integrity Verification
-```text
---- Login ---
-Email: ayush@bank.com
-Password: ayush123
-
-Welcome Ayush Kulhari!  Role: admin
-Choose: 10
-
---- Audit Log Cryptographic Integrity Verification ---
-  [+] INTEGRITY PASS: All cryptographic SHA-256 hash chains match.
-      No records have been modified, deleted, or inserted out of order.
-```
-
-### Scenario G: Automated Test Suite Execution
-```text
-$ python -m pytest tests/ -q
-123 passed
-```
+1. Set `DB_TYPE=mysql`, `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_ADMIN_USER`, `DB_ADMIN_PASSWORD`, and `DB_APP_PASSWORD` in `.env`.
+2. Provision the database, schema, audit triggers, and least-privilege `bank_app` user:
+   ```bash
+   python setup_db.py
+   ```
+   (Or run `python scripts/setup_mysql.py` for schema/procedures/triggers setup.)
+3. Switch runtime `.env` credentials to `DB_USER=bank_app` and `DB_PASSWORD=<your DB_APP_PASSWORD>`, then verify least privilege:
+   ```bash
+   python verify_least_privilege.py
+   ```
+4. Seed demo accounts if desired:
+   ```bash
+   python scripts/seed_demo.py
+   ```
 
 ---
 
-## 7. How to Run Tests
+## Running the CLI & Tests
 
-The current suite contains **123 automated tests** covering database constraints, security controls, authentication privacy, alert workflow, backup/restore, and cyber risk management features. Tests run hermetically against isolated SQLite databases; the MySQL provisioning and privilege-denial script require a configured MySQL service.
+### Run the Interactive CLI
 
 ```bash
-# Run all tests with verbose output
+python main.py
+```
+
+### Run the Test Suite
+
+```bash
 python -m pytest tests/ -v
 ```
 
-### Test Coverage Summary:
-- **`tests/test_database.py` (18 tests):** Schema constraints (`CHECK(balance >= 0)`, `CHECK(amount > 0)`, `role IN ('admin','user')`), email uniqueness, atomic deposit/withdraw/transfer, and transaction rollback verification.
-- **`tests/test_security_fixes.py` (42 tests):** Amount validation (rejection of zero, negative, NaN, Inf), safe numeric input wrappers, password complexity validation, session inactivity tracking, self-transfer prevention, bcrypt hash generation/verification, and RBAC privilege checks.
-- **`tests/test_cyber_controls.py` (16 tests):** Centralized configuration integrity, cryptographic audit log hash chaining, tamper detection on falsified records or broken links, Maker-Checker pending queues, Segregation of Duties (maker self-approval block), checker approval/rejection, admin account unlock, and the open → reviewed → closed alert workflow.
-- **`tests/test_phase3.py` (40 tests):** Password changes, SQLi and velocity detectors, fail-closed database selection, generic login errors, odd-hour detection, atomic banking operations, and amount validation.
+Syntax and import checks:
+
+```bash
+python -m compileall -q bank main.py setup_db.py backup_restore.py verify_least_privilege.py scripts tests
+python -c "import main; from bank import alerts, audit, auth, config, db, security, transactions; print('IMPORTS_OK')"
+```
+
+Backup & restore (SQLite local database):
+
+```bash
+python backup_restore.py backup
+python backup_restore.py list
+python backup_restore.py restore backups/<backup_file>.db
+```
 
 ---
 
-## 8. Threat Model
+## Entity-Relationship Diagram
 
-| Threat | Attack Scenario | Implemented Mitigating Control | Code Implementation |
-|---|---|---|---|
-| **Brute Force Credential Guessing** | Attacker repeatedly guesses passwords via automated script. | Account locks out after 3 failed attempts (`MAX_FAILED_LOGINS`); high-severity alert created; failed attempts counter persisted in database. | [db.py:increment_failed_attempts](db.py#L215), [app.py:login](app.py#L36) |
-| **Negative Amount Theft Exploit** | Attacker initiates transfer with negative amount (e.g., `-5000`), draining victim account and artificially increasing attacker balance. | Multi-layer validation: application rejects negative/zero/NaN/Inf values (`MIN_AMOUNT=0.01`); database enforces `CHECK(amount > 0)` and `CHECK(balance >= 0)`. | [security.py:validate_amount](security.py#L35), [db.py:SCHEMA_SQL](db.py#L69) |
-| **Privilege Escalation & BOLA** | Standard user accesses admin audit logs, security alerts, or views other users' confidential bank statements. | Role-Based Access Control (RBAC): non-admin requests to sensitive views are denied, and unauthorized attempts are logged to the audit log. | [app.py:view_audit_log](app.py#L270), [app.py:view_alerts](app.py#L287), [app.py:view_transactions](app.py#L241) |
-| **Audit Log Tampering & Repudiation** | Malicious insider or intruder modifies or deletes audit log rows in the database to conceal illicit financial actions. | Cryptographic SHA-256 hash chaining: each audit row incorporates the hash of the previous row. `verify_audit_log_integrity()` recalculates hashes and pinpoints modified rows. | [db.py:compute_audit_hash](db.py#L271), `verify_audit_log_integrity` |
-| **Unauthorized Large Fund Transfers** | Rogue insider or compromised user attempts large single-point transfer. | Maker-Checker dual control: transfers > Rs 50,000 are placed in `pending` status without deducting funds; Segregation of Duties bars the maker from self-approving. | [db.py:create_pending_transfer](db.py#L628), `approve_pending_transfer`, [app.py:do_transfer](app.py#L198) |
+```mermaid
+erDiagram
+    Users ||--|| Accounts : "owns"
+    Users ||--o{ Audit_Log : "actor"
+    Users ||--o{ Alerts : "subject / reviewer"
+    Accounts ||--o{ Transactions : "from_account / to_account"
+
+    Users {
+        INTEGER user_id PK
+        TEXT name
+        TEXT email UK
+        TEXT password_hash
+        TEXT role
+        INTEGER failed_attempts
+        INTEGER is_locked
+        TEXT created_at
+    }
+
+    Accounts {
+        INTEGER account_id PK
+        INTEGER user_id FK
+        DECIMAL balance "DECIMAL(12,2) >= 0"
+        TEXT created_at
+    }
+
+    Transactions {
+        INTEGER txn_id PK
+        INTEGER from_account FK
+        INTEGER to_account FK
+        DECIMAL amount "DECIMAL(12,2) > 0"
+        TEXT txn_type "deposit | withdraw | transfer"
+        TEXT status "completed | pending | rejected"
+        TEXT txn_time
+    }
+
+    Audit_Log {
+        INTEGER log_id PK
+        INTEGER user_id FK
+        TEXT action
+        TEXT log_time
+        TEXT previous_hash
+        TEXT entry_hash
+        TEXT ip_address
+    }
+
+    Alerts {
+        INTEGER alert_id PK
+        INTEGER user_id FK
+        TEXT alert_type
+        TEXT description
+        TEXT severity "low | medium | high"
+        TEXT status "open | reviewed | closed"
+        TEXT alert_time
+        INTEGER reviewed_by FK
+        TEXT reviewed_at
+        INTEGER closed_by FK
+        TEXT closed_at
+        TEXT resolution_note
+    }
+```
 
 ---
 
-## 9. Vulnerabilities Found and Fixed
+## Threat Model (Summary)
 
-| # | Vulnerability (Phase 0 Finding) | Before (Vulnerable State) | After (Hardened State) |
-|---|---|---|---|
-| **1** | **Data Persistence & ACID Compliance** | In-memory Python dictionaries/lists; data lost on application restart; no transaction guarantees. | Persistent SQLite database with foreign keys, schema constraints, and atomic `BEGIN`/`COMMIT`/`ROLLBACK` transactions. |
-| **2** | **Weak Credential Storage** | Unsalted SHA-256 (`hashlib.sha256`) vulnerable to precomputed rainbow table attacks. | Adaptive `bcrypt` with work factor 12 and random 16-byte salts generated per password. |
-| **3** | **Missing Role-Based Access Control** | Any user could view all customer transactions, audit logs, and security alerts. | Strict RBAC: transaction history scoped to authenticated user account; audit logs and alerts admin-restricted. |
-| **4** | **Negative Transfer Theft Exploit** | Negative deposit, withdraw, and transfer amounts accepted, enabling balance inflation and fund theft. | Strict multi-layer validation via `validate_amount()` and DB-level `CHECK(amount > 0)` constraints. |
-| **5** | **Application Crash on Invalid Input** | Bare `float(input())` and `int(input())` crashed with unhandled `ValueError` when entering letters or symbols. | Exception-safe wrappers (`safe_float_input()`, `safe_int_input()`) handling invalid formats gracefully. |
-| **6** | **Self-Transfer Glitch** | Users could transfer money to their own account, creating redundant records and inflating audit counters. | Application-layer guard checks `from_account == to_account` and rejects self-transfers prior to database calls. |
-| **7** | **Unattended Session Hijacking** | Indefinite session lifetime allowed unauthorized access if terminal left unattended. | Monotonic session inactivity timer auto-terminating idle sessions after 300 seconds. |
-| **8** | **No Account Lockout Recovery** | Once an account locked after 3 failed attempts, there was no administrative mechanism to unlock it. | Corrective `unlock_user()` function and admin menu console allowing verified identity unlock. |
-| **9** | **Mutable Audit Trail** | Audit logs stored in plain records with no integrity verification, vulnerable to insider tampering. | Cryptographic SHA-256 hash chaining (`previous_hash` & `entry_hash`) with automatic tamper pinpointing. |
-| **10** | **Single-Point Authority on High-Value Transfers** | Large transfers executed immediately without dual authorization or oversight. | Maker-Checker dual control workflow for transfers > Rs 50,000 with Segregation of Duties enforcement. |
+| Threat | Mitigation Implemented |
+|---|---|
+| **Brute-force attacks** | 3-attempt lockout (`MAX_FAILED_LOGINS = 3`) in `bank/auth.py` persists `failed_attempts` and `is_locked`, creates one high-severity `"Brute Force"` alert on lockout, performs real `bcrypt` work via `DUMMY_PASSWORD_HASH` for unknown emails, and returns generic `"Invalid email or password."` errors. |
+| **SQL injection** | Every database query across `bank/`, `setup_db.py`, `scripts/`, and `verify_least_privilege.py` uses parameterized SQL placeholders (`?` for SQLite, `%s` via `MySQLConnectionWrapper`). Regex-based `detect_sqli()` also flags suspicious CLI inputs to `Audit_Log`. |
+| **Unauthorized account access** | RBAC and ownership checks are enforced inside `bank/` data-layer functions as well as `main.py`, alongside a 300-second monotonic inactivity `Session` timeout. |
+| **Transaction tampering** | Amounts are validated with strict `Decimal` parsing (rejecting `bool`, `NaN`, `Infinity`, `<= 0`, `> 2` decimal places, and `> MAX_AMOUNT`), checked by SQL `CHECK` constraints, wrapped in atomic transactions with row/write locks (`BEGIN IMMEDIATE` / `FOR UPDATE`), and guarded by Maker-Checker dual control for transfers `> Rs 50,000.00`. |
+| **Audit-log tampering** | Audit entries are SHA-256 hash chained inside the active transaction (`fail closed` on corrupt tails), balance changes are automatically logged by SQL triggers, `BEFORE UPDATE` / `BEFORE DELETE` triggers block direct `Audit_Log` modification, and `verify_audit_log_integrity()` detects broken links or modified fields. |
+| **Stolen credentials** | Passwords are stored exclusively as salted `bcrypt` hashes (`BCRYPT_ROUNDS = 12`), enforced by `password_meets_policy()` during password changes and demo seeding; `.env` is excluded via `.gitignore` and never committed. |
 
 ---
 
-## 10. Compliance Documents
+## Known Limitations
 
-All compliance and governance workpapers are located in the [docs/](docs/) directory:
-
-- [docs/control_mapping.md](docs/control_mapping.md): Comprehensive Risk & Control Matrix mapping all system controls to the ISO/IEC 27001:2022 Annex A control set.
-- [docs/risk_register.md](docs/risk_register.md): Big-4 style $5 \times 5$ qualitative IT Risk Register evaluating 10 key threat scenarios and residual risks.
-- [docs/PIA.md](docs/PIA.md): Privacy Impact Assessment evaluating personal data flows under India's Digital Personal Data Protection (DPDP) Act 2023.
-- [docs/bcp_dr.md](docs/bcp_dr.md): Business Continuity, Disaster Recovery objectives (RTO $\le$ 15m, RPO $\le$ 1h), and NIST SP 800-61 Incident Response SOP.
-- [docs/control_testing.md](docs/control_testing.md): Educational control-testing workpaper documenting the current SQLite evidence and its scope limits.
-- [docs/security_assessment_report.md](docs/security_assessment_report.md): Formal IT Security Assessment & Vulnerability Remediation Report documenting findings, recommendations, and test verification.
-- [docs/demo_script.md](docs/demo_script.md): Step-by-step 2-minute live interview demonstration script with exact inputs and outputs.
-- [docs/presentation_outline.md](docs/presentation_outline.md): 5-slide interview pitch deck outline and 8 Big-4 IT audit interview questions & model answers.
+- **Live MySQL was not tested in this environment:** No live MySQL server was running on `127.0.0.1:3306` during verification; tests execute against isolated SQLite databases plus mocked `mysql-connector-python` tests.
+- **Velocity tracking is process-local:** Rapid-transaction tracking in `main.py` uses an in-memory `_TRANSACTION_TIMES` dictionary and resets when the CLI process restarts.
+- **SQLite is intended for learning/testing, not production banking:** Single-file SQLite concurrency and local CLI execution are suited for educational study and automated testing rather than multi-user production banking.
+- **Educational project, not a real banking system:** Lacks external network transport (TLS/REST API), hardware/app MFA, external WORM SIEM forwarding, and regulatory compliance certification.
 
 ---
 
-## 11. Known Limitations and Future Work
+## Author & License
 
-To maintain audit transparency, the following technical limitations of this academic prototype are acknowledged:
-1. **Console CLI Interface:** The current prototype operates over a local CLI terminal. Production deployment would require an API backend (e.g., FastAPI / Django REST) over TLS 1.3.
-2. **Authentication Simplicity:** While bcrypt and password complexity are enforced, enterprise banking mandates out-of-band Multi-Factor Authentication (MFA via TOTP or FIDO2 hardware tokens).
-3. **Database Concurrency:** SQLite is well-suited for single-host demonstration and low-concurrency environments. An enterprise deployment would utilize PostgreSQL or MySQL Enterprise with row-level locking and read replicas.
-4. **Log Forwarding:** Audit logs are hash-chained within the primary database. In enterprise production, logs should be streamed via TLS to an external Write-Once-Read-Many (WORM) SIEM (e.g., Splunk / Datadog).
-
----
-
-## 12. Author and License
-
-- **Author:** Ayush Kulhari (B.Tech Computer Science & Engineering)
-- **Target Specialization:** Cyber Risk & Compliance / IT Audit / Information Security
+- **Author:** Ayush Kulhari
 - **License:** [MIT License](LICENSE)

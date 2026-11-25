@@ -1,75 +1,28 @@
-# Privacy Impact Assessment (PIA) & Data Protection Review
+# Privacy & Data Protection Review (`PIA.md`)
 
 **System Name:** Secure Banking System  
-**Framework Alignment:** India's Digital Personal Data Protection (DPDP) Act 2023 & ISO/IEC 27701:2019 (Privacy Information Management)  
-**Evaluation Date:** October 2026  
-**Auditor Classification:** Cyber Risk & Regulatory Compliance Review  
+**Scope:** Educational review of personal data handling in [`bank/`](../bank/) and [`main.py`](../main.py) (not a legal assessment or regulatory certification).
 
 ---
 
-## 1. Executive Summary & Legal Framework
+## 1. Personal Data Inventory & Access Scope
 
-Under India's **Digital Personal Data Protection Act (DPDP Act 2023)**, the banking entity acts as a **Data Fiduciary** responsible for processing personal data belonging to account holders (**Data Principals**). Section 8(5) of the DPDP Act mandates that a Data Fiduciary must protect personal data in its possession or under its control by taking reasonable security safeguards to prevent personal data breaches.
-
-This Privacy Impact Assessment evaluates how personal data is collected, stored, processed, and safeguarded within the **Secure Banking System**.
-
----
-
-## 2. Personal Data Inventory & Data Flow Mapping
-
-The application processes both basic personal identifiers and sensitive financial transaction records:
-
-| Data Element | DPDP Classification | Purpose of Collection | Processing Lawful Basis (DPDP Act Sec. 4/6) | Storage Location (Table & Column) | Access Level |
-|---|---|---|---|---|---|
-| **Full Name** | Personal Data | Customer identification & account ownership | Consent / Contractual Performance | `Users.name` ([db.py](../db.py#L47)) | Authenticated User (Own data), Admin |
-| **Email Address** | Personal Data (Identifier) | Unique user identifier, communication, authentication | Consent / Contractual Performance | `Users.email` ([db.py](../db.py#L48)) | Authenticated User (Own data), Admin |
-| **Password Hash** | Authentication Credential | Identity verification & access authorization | Legitimate Use / Security Requirement | `Users.password_hash` ([db.py](../db.py#L49)) | System Internal Only (Never displayed in CLI) |
-| **Account Balance** | Financial Personal Data | Fund tracking and ledger management | Contractual Performance | `Accounts.balance` ([db.py](../db.py#L60)) | Authenticated User (Own account), Admin |
-| **Transaction History** | Financial Personal Data | Audit trail of deposits, withdrawals, and transfers | Contractual & Statutory Compliance | `Transactions.*` ([db.py](../db.py#L65-L75)) | Authenticated User (Own account), Admin |
-| **Audit Logs** | Technical / Behavioral Data | Security monitoring, incident investigation, non-repudiation | Legal Obligation / Security Safeguard | `Audit_Log.*` ([db.py](../db.py#L77-L84)) | Admin Only (Scoped RBAC) |
-
----
-
-## 3. Principles of the DPDP Act 2023 Implemented in Code
-
-### 3.1 Purpose Limitation (DPDP Act Sec. 4)
-- Personal data collected (name, email, password) is strictly used for authenticating users and executing requested banking transactions.
-- No secondary or undocumented processing (such as profiling, marketing, or external sharing) occurs.
-
-### 3.2 Data Minimisation (DPDP Act Sec. 6)
-- The database schema only collects mandatory fields required to operate a core banking ledger.
-- Cleartext passwords are never retained. Passwords are transformed into salted, non-reversible hashes using `bcrypt` ([db.py:hash_password](../db.py#L172)).
-- Authentication failures on unknown emails log `user_id = NULL` rather than storing unvalidated external metadata ([app.py:login](../app.py#L52)).
-
-### 3.3 Storage Limitation & Data Retention (DPDP Act Sec. 8(7))
-- Personal data must not be retained longer than necessary to satisfy the purpose for which it was processed.
-- Banking regulations (RBI Guidelines / PMLA) require transaction records to be preserved for 5 to 10 years for statutory audit trails.
-- Account termination routines clear active balance records and mark accounts closed while preserving immutable hash-chained audit trails.
-
-### 3.4 Reasonable Security Safeguards (DPDP Act Sec. 8(5))
-The following technical controls prevent personal data exposure and unauthorized access:
-1. **Cryptographic Protection of Credentials:** Passwords hashed with bcrypt (work factor 12) + 16-byte random salt ([db.py:hash_password](../db.py#L172)).
-2. **Access Control / Need-to-Know Enforcement:** Role-Based Access Control ([app.py:view_transactions](../app.py#L231)) prevents customers from viewing any other customer's account balance, transactions, or alerts.
-3. **Session Inactivity Protection:** Auto-termination after 300 seconds ([security.py:Session](../security.py#L141)) prevents shoulder-surfing and unauthorized physical terminal takeover.
-4. **Log Tamper-Evident Integrity:** Audit trails utilize cryptographic SHA-256 hash chaining ([db.py:verify_audit_log_integrity](../db.py#L313)) to prevent covert alteration or deletion of customer records.
-
----
-
-## 4. Rights of the Data Principal (DPDP Act Chapter III)
-
-| Data Principal Right | Statutory Provision | System Capability & Technical Implementation |
-|---|---|---|
-| **Right to Access Information** | DPDP Act Sec. 11 | Users can view their personal account details, current balance, and historical ledger at any time via `view_balance()` and `view_transactions()` in [app.py](../app.py#L219). |
-| **Right to Correction & Updating** | DPDP Act Sec. 12 | Administrators can update customer profile information and unlock falsely locked accounts via `unlock_user()` in [db.py](../db.py#L344). |
-| **Right to Grievance Redressal** | DPDP Act Sec. 13 | Security alerts raised by the system are tracked with unique IDs (`Alerts.alert_id`) and reviewed/closed by administrators via `review_alert()` and `close_alert()` in [db.py](../db.py). |
-
----
-
-## 5. Privacy Risk Assessment & Remediation Summary
-
-| Privacy Threat | Pre-Mitigation Risk | Implemented Safeguards in Code | Post-Mitigation Risk |
+| Data Element | Purpose | Table & Column | Access Level |
 |---|---|---|---|
-| **Cleartext Password Leakage** | Critical | Upgraded SHA-256 to salted bcrypt with adaptive work factor 12 ([db.py](../db.py#L172)). | Low |
-| **Unauthorized Exposure of Financial Ledger** | High | Enforced strict account-scoped filtering on transaction history queries in [db.py:get_transactions_for_account](../db.py#L605). | Low |
-| **Unattended Terminal Data Spillage** | High | Implemented monotonic session timer terminating idle user sessions after 5 minutes ([security.py](../security.py#L141)). | Low |
-| **Repudiation of Malicious Alterations** | High | Chained audit logs with SHA-256 hashes ([db.py:log_action](../db.py#L280)), enabling mathematical proof of audit trail completeness. | Low |
+| **Full Name** | Customer/admin display name | `Users.name` ([`bank/db.py`](../bank/db.py)) | Account owner & Admins |
+| **Email Address** | Unique authentication identifier | `Users.email` ([`bank/db.py`](../bank/db.py)) | Account owner & Admins |
+| **Password Hash** | `bcrypt` authentication verification | `Users.password_hash` ([`bank/auth.py`](../bank/auth.py)) | Internal verification only (never displayed) |
+| **Account Balance** | `DECIMAL(12,2)` ledger balance | `Accounts.balance` ([`bank/db.py`](../bank/db.py)) | Account owner & Admins |
+| **Transactions** | Deposit, withdrawal, transfer history | `Transactions.*` ([`bank/transactions.py`](../bank/transactions.py)) | Account owner & Admins |
+| **Audit Logs** | Security and balance-change trail | `Audit_Log.*` ([`bank/audit.py`](../bank/audit.py)) | Admins only |
+| **Security Alerts** | Intrusion & large-txn incident triage | `Alerts.*` ([`bank/alerts.py`](../bank/alerts.py)) | Admins only |
+
+---
+
+## 2. Safeguards Implemented in Code
+
+1. **No Cleartext Passwords:** Credentials are hashed with salted `bcrypt` (`BCRYPT_ROUNDS = 12` in [`bank/config.py`](../bank/config.py)), and password policies are enforced in [`bank/security.py`](../bank/security.py) for password changes and [`scripts/seed_demo.py`](../scripts/seed_demo.py).
+2. **Minimal Unknown-Email Logging:** Failed login attempts for unknown emails record `user_id = NULL` in `Audit_Log` inside [`bank/auth.py`](../bank/auth.py), and login failure output is always `"Invalid email or password."`.
+3. **Data-Layer Access Controls:** [`bank/transactions.py`](../bank/transactions.py) restricts account reads/mutations (`get_account_by_id`, `get_transactions_for_account`, `deposit`, `withdraw`, `transfer`, `create_pending_transfer`), while [`bank/audit.py`](../bank/audit.py), [`bank/alerts.py`](../bank/alerts.py), and [`bank/auth.py`](../bank/auth.py) enforce admin-only access for audit logs, alerts, locked-user lists, and unlocks.
+4. **Session Timeout:** [`bank/security.py`](../bank/security.py) (`Session`) expires idle CLI sessions after 300 seconds.
+5. **Audit Integrity:** Hash chaining and append-only triggers in [`bank/db.py`](../bank/db.py) protect `Audit_Log` entries against silent alteration.

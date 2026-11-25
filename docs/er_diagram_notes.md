@@ -1,8 +1,7 @@
 # Database Entity-Relationship (ER) Architecture & Data Dictionary
 
-**System Name:** Secure Banking System (DBMS + Cybersecurity IT Audit Prototype)  
-**Database Standards:** 3NF Relational Architecture, Foreign Key Referencing, Cryptographic Hash Chaining  
-**Author:** Ayush Kulhari  
+**System Name:** Secure Banking System  
+**Database Design:** Normalized 3NF Relational Schema with Foreign Keys, `DECIMAL(12,2)` Money Columns, Audit Triggers, and SHA-256 Hash Chaining (Authoritative DDL in [`bank/db.py`](../bank/db.py))
 
 ---
 
@@ -11,95 +10,71 @@
 ```mermaid
 erDiagram
     Users ||--|| Accounts : "owns (1:1)"
-    Users ||--o{ Audit_Log : "generates (1:N)"
-    Users ||--o{ Alerts : "triggers (1:N)"
+    Users ||--o{ Audit_Log : "actor (1:N)"
+    Users ||--o{ Alerts : "subject / reviewer (1:N)"
     Accounts ||--o{ Transactions : "source / destination (1:N)"
 
     Users {
         INTEGER user_id PK "Auto-increment identifier"
         TEXT name "Customer / Admin full name"
-        TEXT email UK "Unique identity & login credential"
-        TEXT password_hash "Bcrypt salted hash (work factor 12)"
-        TEXT role "Role-Based Access Control ('admin' | 'user')"
-        INTEGER failed_attempts "Consecutive failed login counter"
-        INTEGER is_locked "Account lockout state flag (0=unlocked, 1=locked)"
-        TEXT created_at "Timestamp of account registration (UTC)"
+        TEXT email UK "Unique login email"
+        TEXT password_hash "Salted bcrypt hash (rounds=12)"
+        TEXT role "'admin' | 'user'"
+        INTEGER failed_attempts "Consecutive failed login count"
+        INTEGER is_locked "0=unlocked, 1=locked"
+        TEXT created_at "UTC creation timestamp"
     }
 
     Accounts {
         INTEGER account_id PK "Auto-increment primary key"
-        INTEGER user_id FK "References Users(user_id)"
-        REAL balance "CHECK(balance >= 0) non-negative ledger balance"
-        TEXT created_at "Timestamp of account provisioning (UTC)"
+        INTEGER user_id FK "References Users(user_id) UNIQUE"
+        DECIMAL balance "DECIMAL(12,2), CHECK(balance >= 0)"
+        TEXT created_at "UTC creation timestamp"
     }
 
     Transactions {
-        INTEGER txn_id PK "Unique immutable sequence ID"
+        INTEGER txn_id PK "Unique sequence ID"
         INTEGER from_account FK "References Accounts(account_id), NULL for deposits"
         INTEGER to_account FK "References Accounts(account_id), NULL for withdrawals"
-        REAL amount "CHECK(amount > 0) validated positive fund value"
+        DECIMAL amount "DECIMAL(12,2), CHECK(amount > 0)"
         TEXT txn_type "'deposit' | 'withdraw' | 'transfer'"
         TEXT status "'completed' | 'pending' | 'rejected'"
-        TEXT txn_time "Timestamp of transaction event (UTC)"
+        TEXT txn_time "UTC transaction timestamp"
     }
 
     Audit_Log {
         INTEGER log_id PK "Monotonic sequence key"
-        INTEGER user_id FK "Actor user_id or NULL for unknown email attempts"
-        TEXT action "Audit description of security / financial event"
-        TEXT log_time "Timestamp of logged event (UTC)"
-        TEXT previous_hash "SHA-256 hash pointer to preceding audit row"
-        TEXT entry_hash "SHA-256(previous_hash || user_id || action || log_time)"
+        INTEGER user_id FK "Actor user_id or NULL for unknown-email attempts"
+        TEXT action "Event description"
+        TEXT log_time "UTC timestamp"
+        TEXT previous_hash "64-char SHA-256 pointer (genesis=64 zeroes)"
+        TEXT entry_hash "SHA-256(previous_hash|user_id|action|log_time)"
+        TEXT ip_address "Optional client/source IP field"
     }
 
     Alerts {
-        INTEGER alert_id PK "Unique incident ID"
+        INTEGER alert_id PK "Unique alert ID"
         INTEGER user_id FK "Subject user_id"
-        TEXT alert_type "'Brute Force' | 'Large Transaction' | 'Audit Tampering'"
-        TEXT description "Contextual threat narrative"
+        TEXT alert_type "'Brute Force' | 'Large Transaction' | 'Audit Log Tampering'"
+        TEXT description "Event context"
         TEXT severity "'low' | 'medium' | 'high'"
         TEXT status "'open' | 'reviewed' | 'closed'"
-        TEXT alert_time "Timestamp of alert trigger (UTC)"
+        TEXT alert_time "UTC trigger timestamp"
+        INTEGER reviewed_by FK "Admin user_id who reviewed"
+        TEXT reviewed_at "UTC review timestamp"
+        INTEGER closed_by FK "Admin user_id who closed"
+        TEXT closed_at "UTC closure timestamp"
+        TEXT resolution_note "Optional triage/closure note"
     }
 ```
 
 ---
 
-## 2. Relational Cardinality & Integrity Rules
+## 2. Relational Integrity & Trigger Rules
 
-1. **Users (1) $\longleftrightarrow$ Accounts (1):**
-   - Each customer is allocated one primary ledger account.
-   - Enforced by foreign key `Accounts.user_id REFERENCES Users(user_id)` with non-negative check `balance >= 0`.
-2. **Users (1) $\longleftrightarrow$ Audit_Log (0..N):**
-   - Every system activity, successful login, failed authentication, and admin action generates an audit entry.
-   - `user_id` allows `NULL` values to record unauthenticated probe attempts (e.g., failed logins with unknown emails) for forensic tracking without violating relational constraints.
-3. **Users (1) $\longleftrightarrow$ Alerts (0..N):**
-   - Security incidents (3 consecutive failed logins, high-value transfers $> \text{Rs } 50,000$, or audit chain tampering) link directly to the subject account.
-4. **Accounts (1) $\longleftrightarrow$ Transactions (0..N):**
-   - An account can act as sender (`from_account`), recipient (`to_account`), or both across historical transactions.
-   - Dual control transactions remain in status `pending` until approved by an independent checker.
-
----
-
-## 3. Cyber-Specific Columns & Threat Mitigation
-
-| Column | Table | Data Type | Security / Cyber Objective |
-|---|---|---|---|
-| `password_hash` | `Users` | `TEXT` | Stores bcrypt hash with 16-byte random salt and work factor 12, defeating offline precomputed rainbow table attacks. |
-| `failed_attempts` | `Users` | `INTEGER` | Monotonically tracks failed password attempts; triggers account lock when reaching `MAX_FAILED_LOGINS` (3). |
-| `is_locked` | `Users` | `INTEGER` | Persistent lockout flag; prevents brute-force credential stuffing attacks even across server restarts. |
-| `balance` | `Accounts` | `REAL` | Hard schema constraint `CHECK(balance >= 0)` prevents overdraft and protects against race-condition TOCTOU exploits. |
-| `amount` | `Transactions` | `REAL` | Hard schema constraint `CHECK(amount > 0)` prevents negative-amount fund theft exploits at the database level. |
-| `status` | `Transactions` | `TEXT` | Maker-Checker workflow state (`completed`, `pending`, `rejected`); holds transfers $> \text{Rs } 50,000$ for dual authorization. |
-| `previous_hash` | `Audit_Log` | `TEXT` | Cryptographic SHA-256 pointer to preceding audit row (genesis block initialized with 64 zeroes). |
-| `entry_hash` | `Audit_Log` | `TEXT` | `SHA-256(previous_hash \|\| user_id \|\| action \|\| log_time)`; provides mathematical tamper-evidence. |
-| `severity` | `Alerts` | `TEXT` | Incident triage rating (`low`, `medium`, `high`) aligned with NIST SP 800-61 Rev. 2. |
-| `status` | `Alerts` | `TEXT` | Remediation lifecycle tracker (`open`, `reviewed`, `closed`) ensuring every raised threat is investigated and formally closed. |
-
----
-
-## 4. Normalization Justification
-
-- **1NF (First Normal Form):** Every cell holds an atomic, single value (no multi-valued attributes, no repeating groups).
-- **2NF (Second Normal Form):** In 1NF and every non-key attribute is fully functionally dependent on the entire primary key (no partial key dependencies).
-- **3NF (Third Normal Form):** In 2NF and no non-key attribute is transitively dependent on another non-key attribute. For instance, customer details (`name`, `email`) remain in `Users`, while financial balances reside strictly in `Accounts`.
+1. **Users (1) <-> Accounts (1):** Enforced via `user_id ... UNIQUE REFERENCES Users(user_id)`. Balances use `DECIMAL(12,2)` with non-negative checks (`balance >= 0`, plus `ROUND(balance, 2) = balance` on SQLite).
+2. **Accounts (1) <-> Transactions (0..N):** Captures deposits (`from_account IS NULL`), withdrawals (`to_account IS NULL`), and transfers (`from_account` and `to_account`), enforcing `amount > 0` and 2-decimal precision.
+3. **Audit_Log Triggers & Hash Chain:**
+   - `after_accounts_balance_update`: Automatically inserts a hash-chained `Audit_Log` entry on every `Accounts.balance` update (`sha256_hex` UDF on SQLite; `SHA2(..., 256)` on MySQL) and aborts if the existing chain tail is corrupt or unhashed.
+   - `prevent_audit_log_update` / `prevent_audit_log_delete`: Block every `UPDATE` and `DELETE` on `Audit_Log`.
+4. **Alerts Lifecycle:** Supports `open` -> `reviewed` -> `closed` transitions with reviewing/closing administrator attribution (`reviewed_by`, `closed_by`, `resolution_note`).

@@ -4,15 +4,15 @@
 -- IMPORTANT: These stored procedures use MySQL 8 dialect (DELIMITER, SIGNAL
 -- SQLSTATE) and are NOT compatible with SQLite.
 --
--- The production application (db.py) implements equivalent logic as Python
--- functions with explicit ACID transactions:
+-- The runtime application (bank/transactions.py) implements equivalent logic as
+-- Python functions with explicit ACID transactions:
 --
---   MySQL Procedure  -> Python equivalent in db.py
---   ---------------------------------------------------
---   deposit()        -> db.deposit()             (db.py L495)
---   withdraw()       -> db.withdraw()            (db.py L525)
---   transfer()       -> db.transfer()            (db.py L558)
---                       db.create_pending_transfer() for amounts > Rs50,000
+--   MySQL Procedure  -> Python equivalent in bank/transactions.py
+--   -----------------------------------------------------------------
+--   deposit()        -> transactions.deposit()
+--   withdraw()       -> transactions.withdraw()
+--   transfer()       -> transactions.transfer()
+--                       transactions.create_pending_transfer() for > Rs50,000
 --
 -- Key differences from the original MySQL design:
 --   - Insufficient-balance check uses ROLLBACK (not SIGNAL SQLSTATE).

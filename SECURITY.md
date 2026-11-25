@@ -2,19 +2,19 @@
 
 ## Educational Prototype Notice
 
-This repository is developed as an academic / educational prototype demonstrating database management principles, secure software design, and cybersecurity controls (ISO/IEC 27001:2022 Annex A alignment).
+This repository is an academic / educational prototype demonstrating database management principles, secure transaction processing, and defensive software controls.
 
 > [!WARNING]
 > This software is **NOT** intended for production financial infrastructure or real-money transactions. It is designed solely for demonstration, testing, and educational purposes.
 
 ---
 
-## Demo Credentials
+## Demo Accounts
 
-All usernames, emails, and passwords included in the documentation, source files, and database seed scripts (e.g., `ayush@bank.com`, `rahul@bank.com`, `priya@bank.com`, `admin123`, `rahul123`) are **strictly dummy demo credentials**.
+Demo users (`ayush@bank.com`, `rahul@bank.com`, `priya@bank.com`) are not created automatically at startup. They are seeded only by explicitly running [`scripts/seed_demo.py`](scripts/seed_demo.py), which reads passwords from environment variables (`DEMO_ADMIN_PASSWORD`, `DEMO_RAHUL_PASSWORD`, `DEMO_PRIYA_PASSWORD`) or prompts interactively via `getpass` and enforces `password_meets_policy()`.
 
-- Never use real personal or banking passwords when testing this application.
-- Never deploy this prototype with the default demo accounts or seed passwords.
+- Never reuse real personal or banking passwords when testing this application.
+- Never deploy this prototype with test or demo accounts enabled.
 
 ---
 
@@ -23,10 +23,8 @@ All usernames, emails, and passwords included in the documentation, source files
 If you discover a security flaw, potential exploit, or vulnerability in this educational project:
 
 1. **Do not** create a public GitHub issue detailing reproducible exploit steps.
-2. Please report findings responsibly by opening a private security advisory on GitHub or by contacting the project maintainer directly via GitHub profile: [ayushkulhari47](https://github.com/ayushkulhari47).
+2. Please report findings responsibly by opening a private security advisory on GitHub or by contacting the project maintainer via GitHub profile: [ayushkulhari47](https://github.com/ayushkulhari47).
 3. Include in your report:
    - A clear description of the vulnerability and attack vector.
    - Proof of Concept (PoC) steps or automated test reproducing the behavior.
    - Suggested remediation or patch if available.
-
-We appreciate responsible vulnerability disclosure and will review any reports promptly.

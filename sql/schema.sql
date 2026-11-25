@@ -1,13 +1,13 @@
 -- =============================================================================
 -- schema.sql  --  ACTUAL PRODUCTION SCHEMA (SQLite / sqlite3)
 -- =============================================================================
--- This file documents the exact DDL used by db.py (SCHEMA_SQL constant).
+-- This file documents the SQLite DDL used by bank/db.py (SCHEMA_SQL constant).
 -- The application uses Python's built-in sqlite3 module with:
---   isolation_level = None  (manual BEGIN / COMMIT / ROLLBACK)
+--   isolation_level = None  (manual BEGIN IMMEDIATE / COMMIT / ROLLBACK)
 --   PRAGMA foreign_keys = ON
 --
 -- NOTE: The application creates and migrates this schema automatically via
---       db.init_db().  You do NOT need to run this file manually.
+--       bank.db.init_db(). You do NOT need to run this file manually.
 --       It is provided here for review and documentation purposes only.
 -- =============================================================================
 
@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS Audit_Log (
     action        TEXT NOT NULL,
     log_time      TEXT NOT NULL DEFAULT (datetime('now')),
     previous_hash TEXT,                        -- hash of preceding log entry
-    entry_hash    TEXT                         -- SHA-256 hash of this entry
+    entry_hash    TEXT,                        -- SHA-256 hash of this entry
+    ip_address    TEXT
 );
 
 -- Alerts table: security incidents raised by the application.

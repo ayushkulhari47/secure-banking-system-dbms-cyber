@@ -1,49 +1,44 @@
-# IT Audit Control Testing Workpaper & Evidence Report
+# Control Testing Workpaper & Evidence Report
 
-**Engagement:** Cyber Risk & IT Controls Review (IT Audit)  
 **Target System:** Secure Banking System (Core Ledger & Security Subsystems)  
-**Audit Standard:** ISO/IEC 27001:2022 / COBIT 2019 / SOX ITGC Testing  
-**Audit Test Run:** October 2026  
-**Total Automated Tests:** 123  
-**Current Test Status:** **123 passed / 0 failed on the hermetic SQLite suite**  
+**Total Automated Tests:** 240  
+**Current Test Status:** **240 passed / 0 failed** (executed against isolated SQLite test databases plus mocked `mysql-connector-python` tests)
 
-> Scope note: this is an educational control-testing workpaper, not an independent audit or a certification. MySQL provisioning, live least-privilege grants, and operational backup/restore require a configured service and are not proven by the SQLite CI suite.
+> [!NOTE]
+> Scope note: This is an educational testing summary, not an independent audit or certification. Live MySQL execution (`setup_db.py`, `scripts/setup_mysql.py`, and `verify_least_privilege.py`) requires a running MySQL server and was **not** tested live in this environment.
 
 ---
 
 ## 1. Executive Testing Summary
-During this control testing cycle, the IT Audit team evaluated the design and operating effectiveness of the key automated controls governing the **Secure Banking System**. Testing encompassed application controls, database integrity constraints, cryptographic protection mechanisms, role-based access limits, Maker-Checker segregation of duties, and audit trail resilience.
 
-The current 123-test suite was executed through the hermetic automated testing suite (`pytest`). The results provide evidence for the SQLite path only; they do not by themselves prove production effectiveness or MySQL privilege configuration.
-
----
-
-## 2. Detailed Control Testing Workpaper
-
-| Control Ref | Control Name | Test Procedure Performed | Expected Result | Actual Result Observed | Operating Effectiveness | Test Evidence (Pytest Function) |
-|---|---|---|---|---|---|---|
-| **CTL-01** | **SQL Injection Prevention** | Attempted to submit SQL metacharacters (`' OR 1=1 --`) and raw syntax into account query parameters. | SQL statements must treat input purely as parameter data via SQLite parameterized queries (`?`). | All queries execute safely; no SQL syntax injected or unescaped. | **Effective** | [tests/test_database.py::TestSchema](../tests/test_database.py#L109) |
-| **CTL-02** | **Bcrypt Password Cryptography** | Hashed test password twice and inspected hash structure and salt randomness. | Output must begin with `$2b$`, incorporate work factor 12, and generate distinct hashes for identical passwords. | Hashes format verified; identical passwords generated completely different outputs. | **Effective** | [tests/test_security_fixes.py::TestBcryptHashing](../tests/test_security_fixes.py#L293) |
-| **CTL-03** | **Password Complexity Policy** | Tested passwords missing uppercase, lowercase, numbers, special characters, or $<8$ chars. | Passwords violating policy are rejected with specific diagnostic violation messages. | All non-compliant passwords rejected; valid passwords approved. | **Effective** | [tests/test_security_fixes.py::TestPasswordPolicy](../tests/test_security_fixes.py#L155) |
-| **CTL-04** | **Brute-Force Account Lockout** | Simulated 3 consecutive failed login attempts on valid account `rahul@bank.com`. | Account locks automatically (`is_locked=1`), lockout counter increments to 3, and high-severity alert generated. | Account locked; 4th login attempt denied; alert generated. | **Effective** | [tests/test_security_fixes.py::TestBruteForceLockout](../tests/test_security_fixes.py#L328) |
-| **CTL-05** | **Negative Amount Exploitation Guard** | Attempted deposit/transfer with `-5000.00`, `0.00`, `NaN`, and `Infinity`. | Input rejected at application layer ([validate_amount](../security.py#L35)) and database layer (`CHECK(amount > 0)`). | All invalid and negative values rejected with clear error message; balance unaffected. | **Effective** | [tests/test_security_fixes.py::TestAmountValidation](../tests/test_security_fixes.py#L35) |
-| **CTL-06** | **Safe Input Exception Handling** | Submitted string inputs (`"abc"`, `""`, `"!@#"`) into numeric input prompts. | Prompts must not raise unhandled `ValueError`; must return `None` gracefully. | `safe_float_input()` and `safe_int_input()` handled non-numeric values without crashing. | **Effective** | [tests/test_security_fixes.py::TestSafeInputWrappers](../tests/test_security_fixes.py#L104) |
-| **CTL-07** | **Inactivity Session Timeout** | Initialized session, waited past inactivity duration, and queried session status. | `is_expired()` returns `True`; user auto-logged out upon next menu loop. | Session expired after timeout; active refresh resets timer properly. | **Effective** | [tests/test_security_fixes.py::TestSessionInactivityTimeout](../tests/test_security_fixes.py#L210) |
-| **CTL-08** | **Role-Based Access Control (RBAC)** | Authenticated as standard user (`role='user'`) and attempted to access admin audit log and alert views. | Access denied with explicit error message; unauthorized access attempt logged to audit trail. | Access rejected; violation recorded in `Audit_Log`. | **Effective** | [tests/test_security_fixes.py::TestRoleBasedAccessControl](../tests/test_security_fixes.py#L363) |
-| **CTL-09** | **Self-Transfer Restriction** | Attempted to initiate transfer where `from_account == to_account`. | Transfer blocked with informative error before reaching database layer. | Self-transfer intercepted; zero database writes committed. | **Effective** | [tests/test_security_fixes.py::TestSelfTransferBlock](../tests/test_security_fixes.py#L262) |
-| **CTL-10** | **Maker-Checker Segregation of Duties** | (a) Initiated transfer of Rs 75,000 (> threshold).<br>(b) Maker attempted self-approval.<br>(c) Independent checker approved transfer. | (a) Status set to `pending`; balances unchanged.<br>(b) Self-approval blocked with SoD violation.<br>(c) Balances debited & credited atomically upon checker approval. | (a) Transfer queued in `pending`.<br>(b) SoD violation returned.<br>(c) Independent approval executed transfer correctly. | **Effective** | [tests/test_cyber_controls.py::TestMakerCheckerWorkflow](../tests/test_cyber_controls.py#L108) |
-| **CTL-11** | **Centralized Security Configuration** | Validated parameters across [config.py](../config.py) against security baseline requirements. | All parameters (`LARGE_TXN_THRESHOLD`, `MAX_FAILED_LOGINS`, etc.) must exist, be typed, and within bounds. | All configuration constants present and validated. | **Effective** | [tests/test_cyber_controls.py::TestCentralizedConfiguration](../tests/test_cyber_controls.py#L40) |
-| **CTL-12** | **Tamper-Evident Audit Hash Chaining** | Inserted audit records and verified `previous_hash` and `entry_hash` linkage. | SHA-256 hash chain links each entry to preceding record; verification passes on untampered log. | Hash chain correctly generated; `verify_audit_log_integrity()` returns `(True, None)`. | **Effective** | [tests/test_cyber_controls.py::TestTamperEvidentAuditLog](../tests/test_cyber_controls.py#L60) |
-| **CTL-13** | **Audit Log Tamper Detection** | Directly altered an audit action string and altered a `previous_hash` pointer in SQLite. | `verify_audit_log_integrity()` must return `False` and return the exact corrupted `log_id`. | Tampering detected immediately; exact record IDs (e.g., `log_id=2`, `log_id=3`) flagged. | **Effective** | [tests/test_cyber_controls.py::TestTamperEvidentAuditLog](../tests/test_cyber_controls.py#L88) |
-| **CTL-14** | **Admin Account Unlock Remediation** | Locked account via 3 failed logins, then invoked admin `unlock_user()`. | `is_locked` reset to 0, `failed_attempts` reset to 0; user successfully logs in. | Account unlocked; user removed from locked accounts register. | **Effective** | [tests/test_cyber_controls.py::TestAdminAccountUnlock](../tests/test_cyber_controls.py#L190) |
-| **CTL-15** | **Security Alert Remediation** | Generated security alert, called `review_alert()`, then `close_alert()`. | Alert transitions `open` → `reviewed` → `closed`; each step has admin attribution. | Current test verifies the three-state workflow and rejects close-before-review. | **Effective on SQLite** | [tests/test_cyber_controls.py::TestSecurityAlertRemediation](../tests/test_cyber_controls.py) |
-| **CTL-16** | **ACID Transaction Atomicity & Rollback** | Simulated intentional error during deposit/withdraw/transfer midway through execution. | Entire multi-table transaction must roll back; balances remain unchanged. | Rollback verified; zero partial state or phantom funds created. | **Effective** | [tests/test_database.py::TestACIDDeposit](../tests/test_database.py#L170), `TestACIDWithdraw`, `TestACIDTransfer` |
+The `pytest` suite evaluates database constraints, `Decimal` monetary validation, `bcrypt` authentication, constant-work unknown-email handling, 3-attempt brute-force lockout, data-layer RBAC and ownership checks, ACID transaction rollback, Maker-Checker Segregation of Duties, SHA-256 audit hash chaining, append-only SQL triggers, alert workflows, and SQLite hot backup/restore integrity.
 
 ---
 
-## 3. Test Execution Command
-To re-run and independently reproduce this test evidence on any workstation:
+## 2. Automated Test Modules
+
+| Test File | Scope Covered |
+|---|---|
+| [`tests/test_database.py`](../tests/test_database.py) | Schema constraints, email uniqueness, ACID rollback behavior, and `Audit_Log` basics |
+| [`tests/test_security_fixes.py`](../tests/test_security_fixes.py) | Amount bounds, safe CLI wrappers, password policy, `Session` timeout, self-transfer block, `bcrypt`, RBAC |
+| [`tests/test_cyber_controls.py`](../tests/test_cyber_controls.py) | Configuration constants, audit tamper detection, Maker-Checker workflow, admin unlock, alert remediation |
+| [`tests/test_phase3.py`](../tests/test_phase3.py) | Password change flow, SQLi/velocity/odd-hour helpers, atomic transfers, amount validation |
+| [`tests/test_config_db.py`](../tests/test_config_db.py) | Env-driven DB configuration, zero hardcoded root credentials, `mysql-connector-python` wrapper, fail-closed engine selection |
+| [`tests/test_auth_login.py`](../tests/test_auth_login.py) | Runtime `DUMMY_PASSWORD_HASH` verification, generic login failure output, demo seed password policy |
+| [`tests/test_rbac_data_layer.py`](../tests/test_rbac_data_layer.py) | Data-layer ownership checks, admin-only audit/alerts/unlock, Maker-Checker SoD checks |
+| [`tests/test_decimal_money.py`](../tests/test_decimal_money.py) | Exact `Decimal` arithmetic, 2-decimal precision enforcement, bool/NaN/Inf rejection, SQLite `CHECK(ROUND(..., 2) = ...)` |
+| [`tests/test_atomic_transfers.py`](../tests/test_atomic_transfers.py) | Fault-injected mid-transfer/approval rollbacks, pending balance reserves, `BEGIN IMMEDIATE` / MySQL `FOR UPDATE` |
+| [`tests/test_atomic_audit.py`](../tests/test_atomic_audit.py) | Single-connection atomic audit inserts, rollback consistency, fail-closed chain verification |
+| [`tests/test_audit_triggers.py`](../tests/test_audit_triggers.py) | SQLite balance-change triggers, `UPDATE`/`DELETE` block triggers, MySQL trigger definitions, no duplicate audit rows |
+| [`tests/test_intrusion_and_unlock.py`](../tests/test_intrusion_and_unlock.py) | 3-attempt lockout transition, single Brute Force alert, admin-only unlock, atomic Large Transaction alerts |
+| [`tests/test_maker_checker.py`](../tests/test_maker_checker.py) | Threshold routing (`<= 50,000.00` vs `> 50,000.00`), pending reserves, SoD, safe insufficient-fund rejection, reserve release, idempotency |
+| [`tests/test_backup_restore.py`](../tests/test_backup_restore.py) | SQLite online hot backup, `.sha256` sidecar check, tampered backup rejection, atomic restore |
+
+---
+
+## 3. Verification Commands
+
 ```bash
+python -m compileall -q bank main.py setup_db.py backup_restore.py verify_least_privilege.py scripts tests
 python -m pytest tests/ -v
 ```
-All 123 automated tests execute hermetically in isolated memory or temporary storage, leaving no intentional database artifacts or locks.

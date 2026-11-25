@@ -1,125 +1,39 @@
-Secure Banking System with Intrusion Detection and Audit Logging
+# Project Report — Secure Banking System
 
-A DBMS + Cybersecurity Project
-Author: Ayush Kulhari
-Course: B.Tech CSE
+**Author:** Ayush Kulhari  
+**Project Type:** Educational DBMS + Cybersecurity Python Prototype
 
+---
 
-1. What is this project?
+## 1. Overview
 
-Imagine you have a bank app on your phone. You login, check balance, send money. Simple right? But what if someone tries to hack into your account by guessing your password again and again? Or what if someone suddenly transfers a huge amount of money suspiciously?
+This project builds a command-line banking ledger in Python that pairs standard account operations (account lookup, deposits, withdrawals, transfers, transaction history) with layered DBMS and application security controls.
 
-This project builds exactly that kind of smart banking system. It not only stores your money and transactions like a normal bank but it also watches for suspicious activity and raises an alarm automatically. No human needs to sit and monitor it. The database does it by itself.
+---
 
-This is why it is a DBMS plus Cybersecurity project.
+## 2. Database Schema & Normalization
 
+The relational schema in [`bank/db.py`](../bank/db.py) uses five normalized tables:
+- **`Users`**: stores name, unique email, `bcrypt` password hash, role (`admin` | `user`), failed login counter, and lockout flag.
+- **`Accounts`**: 1:1 user account mapping with `DECIMAL(12,2)` balance and `CHECK(balance >= 0)`.
+- **`Transactions`**: ledger of `deposit`, `withdraw`, and `transfer` rows with `DECIMAL(12,2)` amounts (`CHECK(amount > 0)`) and status (`completed`, `pending`, `rejected`).
+- **`Audit_Log`**: hash-chained log entries (`previous_hash`, `entry_hash`) protected by append-only SQL triggers.
+- **`Alerts`**: security incidents (`Brute Force`, `Large Transaction`, `Audit Log Tampering`) tracked across `open` -> `reviewed` -> `closed`.
 
-2. What problems does it solve?
+---
 
-Problem 1 - Someone tries to guess your password multiple times
-Our system detects this automatically and locks the account after 3 wrong attempts.
+## 3. Security & Transactional Controls
 
-Problem 2 - Someone makes a suspiciously large transaction
-Our system flags any transaction above Rs 50,000 as suspicious and creates an alert.
+- **Authentication & Lockout (`bank/auth.py`):** Salted `bcrypt` hashing (`BCRYPT_ROUNDS = 12`), constant-work dummy verification for unknown emails, generic `"Invalid email or password."` error messages, 3-attempt account lockout raising one high-severity `"Brute Force"` alert, and admin-only account unlock.
+- **Exact Money & ACID Transactions (`bank/security.py`, `bank/transactions.py`, `bank/db.py`):** Strict `Decimal("0.01")` validation, `DECIMAL(12,2)` schema columns, `BEGIN IMMEDIATE` (SQLite) and ordered `FOR UPDATE` row locks (MySQL) with safe rollback on error.
+- **Data-Layer RBAC & Maker-Checker (`bank/transactions.py`, `main.py`):** Ownership and admin checks enforced in `bank/`; transfers strictly above `LARGE_TXN_THRESHOLD` (`Rs 50,000.00`) enter `'pending'`, reserve outgoing funds, and require approval by an independent admin (blocking non-admins, the maker, and recipient admins). Deposits and withdrawals execute immediately without Maker-Checker.
+- **Audit Hash Chain & SQL Triggers (`bank/audit.py`, `bank/db.py`, `sql/triggers.sql`):** SHA-256 hash-chained `Audit_Log` writes inside active transactions, fail-closed verification, automatic balance-update triggers on `Accounts`, and `BEFORE UPDATE` / `BEFORE DELETE` triggers rejecting direct log edits.
+- **Alerts & Backups (`bank/alerts.py`, `backup_restore.py`):** Atomic alerts on lockout and large transactions, plus hot SQLite backups with `.sha256` checksum verification.
 
-Problem 3 - No one knows what happened in the system
-Our system keeps a record of every single action. Who logged in, when, what they did. This is called an audit log.
+---
 
-Problem 4 - Passwords stored as plain text are dangerous
-Our system never stores the actual password. It stores a scrambled version called a hash. Even if someone steals the database they cannot read the passwords.
+## 4. Database Backends & Verification
 
-
-3. Database Tables
-
-Think of tables like Excel sheets. We have 5 sheets in our database.
-
-Users sheet - stores name, email, password hash, role and how many times login failed
-Accounts sheet - stores which user owns which account and how much balance they have
-Transactions sheet - stores every deposit, withdrawal and transfer ever made
-Audit Log sheet - stores every action done in the system with time and user details
-Alerts sheet - stores every suspicious activity that was detected
-
-
-4. How the tables are connected
-
-One user has one bank account
-One user can do many transactions
-Every action by a user creates a log entry
-Every suspicious action creates an alert entry
-
-
-5. Normalization - why we designed tables this way
-
-Normalization just means designing tables properly so data is not repeated unnecessarily.
-
-1NF means each cell has only one value. No lists inside a cell.
-2NF means every column depends on the full primary key not just part of it.
-3NF means no column depends on another non-key column.
-
-Our database follows all three rules. This makes it clean, efficient and easy to maintain.
-
-
-6. The Cyber Security Part - How intrusion detection works
-
-This is the most important and unique part of the project.
-
-We wrote something called SQL Triggers. A trigger is like a security camera. It watches the database and automatically does something when it sees a suspicious event.
-
-Trigger 1 - Brute Force Login Detection
-When a user enters wrong password 3 times the trigger automatically locks the account and inserts a warning into the Alerts table. No human needs to do this manually.
-
-Trigger 2 - Large Transaction Detection
-When any transaction above Rs 50,000 happens the trigger automatically inserts an alert saying this transaction looks suspicious.
-
-Trigger 3 - Audit Logging
-Every successful login and every transaction automatically creates a record in the Audit Log table. This way nothing in the system goes unrecorded.
-
-
-7. Stored Procedures - making transactions safe
-
-A stored procedure is like a saved recipe. Instead of writing the same SQL code again and again we save it once and just call it whenever needed.
-
-We created 3 procedures:
-Deposit - adds money to an account safely
-Withdraw - removes money only if balance is sufficient, otherwise shows error
-Transfer - moves money from one account to another safely
-
-
-8. ACID Properties - why our transactions are reliable
-
-ACID is a set of rules that makes database transactions reliable.
-
-Atomicity means either the full transaction happens or nothing happens. Money will not disappear halfway.
-Consistency means the database always stays in a valid state. Balance never goes negative.
-Isolation means two transactions do not interfere with each other.
-Durability means once a transaction is saved it stays saved even if the system crashes.
-
-
-9. Technologies used
-
-MySQL for the database
-SQL Triggers and Stored Procedures for security logic
-Python for the banking application
-GitHub for storing and sharing the project
-
-
-10. Testing results
-
-We tested the system on db-fiddle for SQL and onecompiler for Python.
-
-Login with correct password - worked perfectly
-Login with wrong password 3 times - account got locked and alert was raised
-Deposit money - balance updated correctly
-Withdraw more than balance - system correctly showed insufficient balance error
-Transfer between accounts - both balances updated correctly
-View audit log - all actions were recorded
-
-
-11. Conclusion
-
-This project shows that a database system can be smart enough to protect itself. By combining SQL triggers, stored procedures, audit logging and password hashing we built a banking system that is both functional and secure.
-
-Any student reading this project will understand how real banks protect your data and detect fraud. That is exactly what this project demonstrates.
-
-
-GitHub: https://github.com/ayushkulhari47/secure-banking-system-dbms-cyber
+- **SQLite 3** is the default local/testing backend.
+- **MySQL 8+ (`mysql-connector-python`)** is supported via environment variables (`DB_TYPE=mysql`), explicit provisioning (`setup_db.py`, `scripts/setup_mysql.py`), and least-privilege verification (`verify_least_privilege.py`), with zero silent fallback to SQLite.
+- **Automated Testing:** `python -m pytest tests/ -v` runs **240 tests** against isolated SQLite databases and mocked MySQL connector tests. Live MySQL execution was not tested in this environment.
