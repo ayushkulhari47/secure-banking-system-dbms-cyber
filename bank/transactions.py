@@ -413,7 +413,7 @@ def get_pending_transfers(admin_user_id: int = None) -> list:
             "FROM Transactions t "
             "JOIN Accounts a ON t.from_account = a.account_id "
             "JOIN Users u ON a.user_id = u.user_id "
-            "WHERE t.status = 'pending' "
+            "WHERE t.status = 'pending' AND t.txn_type = 'transfer' "
             "ORDER BY t.txn_time ASC"
         ).fetchall()
         return [_normalize_txn_row(r) for r in rows]
@@ -437,7 +437,8 @@ def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
             )
         lock_clause = " FOR UPDATE" if db.is_mysql_connection(conn) else ""
         txn = conn.execute(
-            "SELECT * FROM Transactions WHERE txn_id = ? AND status = 'pending'"
+            "SELECT * FROM Transactions "
+            "WHERE txn_id = ? AND status = 'pending' AND txn_type = 'transfer'"
             + lock_clause,
             (txn_id,),
         ).fetchone()
@@ -538,7 +539,8 @@ def reject_pending_transfer(
             return False, "Only administrators may reject transfers."
         lock_clause = " FOR UPDATE" if db.is_mysql_connection(conn) else ""
         txn = conn.execute(
-            "SELECT * FROM Transactions WHERE txn_id = ? AND status = 'pending'"
+            "SELECT * FROM Transactions "
+            "WHERE txn_id = ? AND status = 'pending' AND txn_type = 'transfer'"
             + lock_clause,
             (txn_id,),
         ).fetchone()
