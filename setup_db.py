@@ -3,53 +3,52 @@
 setup_db.py  --  Provision the MySQL database for the Secure Banking System.
 
 What this script does (idempotent -- safe to run multiple times):
-  1. Connects to MySQL and creates the `secure_banking` database if absent.
-  2. Runs db.init_db() to create all five tables (IF NOT EXISTS) and seed
-     demo users / accounts via the application's own code path.
+  1. Connects to MySQL and creates the configured database if absent.
+  2. Runs db.init_db() to create all five tables (IF NOT EXISTS) and apply migrations.
   3. Adds the `ip_address` column to Audit_Log if it is missing (migration).
   4. Creates / replaces the three stored procedures from sql/procedures.sql:
        deposit, withdraw, transfer
-  5. Removes legacy audit-writing triggers. Audit entries and alerts are owned
-     by the Python transaction layer so every entry uses the hash chain exactly once.
-  6. Creates a least-privilege MySQL user 'bank_app'@'localhost' and grants
-     only the required privileges per table (principle of least privilege).
-     The bank_app password
-     must be set in .env as DB_APP_PASSWORD.  Root is used ONLY for this
-     provisioning step; the running application uses bank_app.
-  7. Runs diagnostic SELECTs to confirm the database is properly populated.
+  5. Removes legacy audit-writing triggers so Python owns the audit hash chain.
+  6. Creates a least-privilege MySQL user 'bank_app'@'localhost' when
+     DB_APP_PASSWORD is set in environment variables.
+  7. Runs diagnostic SELECTs to confirm the database schema is ready.
 
 Usage:
     python setup_db.py
-
-Configuration is read from .env (git-ignored).  See .env.example for keys.
-DB_TYPE must be set to 'mysql' for this script to connect.
+    python scripts/seed_demo.py   # optional explicit demo seeding
 """
 
 import os
+import re
 import sys
-import pymysql
+
+import mysql.connector
 from bank import config, db
-
-# ---------------------------------------------------------------------------
-# Helper: raw PyMySQL connection (autocommit=True for DDL)
-# ---------------------------------------------------------------------------
-
-
-def _raw_conn():
-    """Open a raw PyMySQL connection to secure_banking with autocommit."""
-    return pymysql.connect(
-        host=config.DB_HOST,
-        port=config.DB_PORT,
-        user=config.DB_USER,
-        password=config.DB_PASSWORD,
-        database=config.DB_NAME,
-        autocommit=True,
-        charset="utf8mb4",
-    )
-
 
 DB_APP_USER = "bank_app"
 DB_APP_HOST = "localhost"
+_VALID_IDENT = re.compile(r"^[A-Za-z0-9_]+$")
+_VALID_PRIVS = {"SELECT", "INSERT", "UPDATE"}
+
+
+def _validate_identifier(name: str, label: str) -> str:
+    if not name or not _VALID_IDENT.fullmatch(name):
+        raise ValueError(f"Invalid SQL identifier for {label}: {name!r}")
+    return name
+
+
+def _raw_conn():
+    """Open a raw mysql-connector-python connection to DB_NAME with autocommit."""
+    mysql_cfg = config.get_mysql_config()
+    return mysql.connector.connect(
+        host=mysql_cfg["host"],
+        port=mysql_cfg["port"],
+        user=mysql_cfg["user"],
+        password=mysql_cfg["password"],
+        database=mysql_cfg["database"],
+        autocommit=True,
+        charset="utf8mb4",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -58,41 +57,42 @@ DB_APP_HOST = "localhost"
 
 
 def ensure_database():
-    print(f"\n[1/6] Ensuring database '{config.DB_NAME}' exists ...")
-    admin = pymysql.connect(
-        host=config.DB_HOST,
-        port=config.DB_PORT,
-        user=config.DB_USER,
-        password=config.DB_PASSWORD,
+    mysql_cfg = config.get_mysql_config()
+    db_name = _validate_identifier(mysql_cfg["database"], "DB_NAME")
+    print(f"\n[1/6] Ensuring database '{db_name}' exists ...")
+    admin = mysql.connector.connect(
+        host=mysql_cfg["host"],
+        port=mysql_cfg["port"],
+        user=mysql_cfg["user"],
+        password=mysql_cfg["password"],
         autocommit=True,
         charset="utf8mb4",
     )
     try:
         with admin.cursor() as cur:
             cur.execute(
-                f"CREATE DATABASE IF NOT EXISTS `{config.DB_NAME}` "
+                f"CREATE DATABASE IF NOT EXISTS `{db_name}` "
                 "CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
             )
-        print(f"    OK  Database `{config.DB_NAME}` is present.")
+        print(f"    OK  Database `{db_name}` is present.")
     finally:
         admin.close()
 
 
 # ---------------------------------------------------------------------------
-# Step 2 -- Create tables and seed demo data via db.init_db()
+# Step 2 -- Create tables via db.init_db()
 # ---------------------------------------------------------------------------
 
 
 def init_schema():
-    print("\n[2/6] Running db.init_db() to create tables and seed demo data ...")
+    print("\n[2/6] Running db.init_db() to create tables and apply migrations ...")
     db.init_db()
-    # Only the provisioning account may run MySQL schema migrations.
     conn = db.get_connection()
     try:
         db._migrate_mysql_alert_workflow(conn)
     finally:
         conn.close()
-    print("    OK  All five tables created (IF NOT EXISTS) and demo data seeded.")
+    print("    OK  All five tables created (IF NOT EXISTS).")
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +123,7 @@ def migrate_audit_log():
 
 
 # ---------------------------------------------------------------------------
-# Step 4 -- Stored procedures (from sql/procedures.sql logic)
+# Step 4 -- Stored procedures
 # ---------------------------------------------------------------------------
 
 
@@ -132,8 +132,6 @@ def create_stored_procedures():
     conn = _raw_conn()
     try:
         with conn.cursor() as cur:
-
-            # Drop existing versions
             for name in ("deposit", "withdraw", "transfer"):
                 cur.execute(f"DROP PROCEDURE IF EXISTS `{name}`")
 
@@ -185,7 +183,7 @@ def create_stored_procedures():
 
 
 # ---------------------------------------------------------------------------
-# Step 5 -- Triggers (from sql/triggers.sql logic, corrected for MySQL 8)
+# Step 5 -- Remove legacy audit-writing triggers
 # ---------------------------------------------------------------------------
 
 
@@ -194,12 +192,8 @@ def create_triggers():
     conn = _raw_conn()
     try:
         with conn.cursor() as cur:
-
             for name in ("after_failed_login", "after_transaction", "after_user_login"):
                 cur.execute(f"DROP TRIGGER IF EXISTS `{name}`")
-
-            # Intentionally leave no triggers that write security records.
-            # Python owns the transaction boundary and the audit hash chain.
         print(
             "    OK  Legacy triggers removed; Python transaction layer is authoritative."
         )
@@ -208,7 +202,7 @@ def create_triggers():
 
 
 # ---------------------------------------------------------------------------
-# Step 6 -- Verification: show tables and seeded data
+# Step 6 -- Verification
 # ---------------------------------------------------------------------------
 
 
@@ -217,7 +211,6 @@ def verify():
     conn = _raw_conn()
     try:
         with conn.cursor() as cur:
-
             cur.execute("SHOW TABLES")
             tables = [r[0] for r in cur.fetchall()]
             print(f"    Tables in `{config.DB_NAME}`: {tables}")
@@ -228,7 +221,7 @@ def verify():
                 "ORDER BY u.user_id"
             )
             rows = cur.fetchall()
-            print("    Seeded users & balances:")
+            print(f"    Users & balances present: {len(rows)}")
             for r in rows:
                 print(
                     f"      user_id={r[0]}  {r[1]:<20} {r[2]:<30} role={r[3]}  "
@@ -250,11 +243,9 @@ def verify():
             )
             trigs = [r[0] for r in cur.fetchall()]
             print(f"    Triggers: {trigs}")
-
     finally:
         conn.close()
 
-    # Also confirm db.get_connection() returns MySQL
     conn2 = db.get_connection()
     engine = "MySQL" if db.is_mysql_connection(conn2) else "SQLite"
     conn2.close()
@@ -267,93 +258,81 @@ def verify():
 
 
 # ---------------------------------------------------------------------------
-# Step 6 -- Least-privilege app user: bank_app
+# Least-privilege app user: bank_app
 # ---------------------------------------------------------------------------
 
 
 def create_app_user():
     """
     Create 'bank_app'@'localhost' with the minimum privileges the application
-    needs at runtime (ISO 27001:2022 A.8.18 Privileged Access Rights / A.5.15
-    Principle of Least Privilege).
-
-    Grants are table-specific. Audit_Log is append-only: it receives SELECT and
-    INSERT but never UPDATE or DELETE.
-    No DROP, ALTER, GRANT, DELETE, or administrative privileges.
-
-    The bank_app password is read from DB_APP_PASSWORD in .env.
-    Root credentials are used ONLY during this provisioning step.
+    needs at runtime when DB_APP_PASSWORD is set.
     """
     app_password = os.environ.get("DB_APP_PASSWORD", "")
     if not app_password:
         print(
-            "\n[6/7] Skipping bank_app user creation: DB_APP_PASSWORD not set in .env.\n"
-            "      Set DB_APP_PASSWORD=<strong_password> in your .env and re-run to\n"
-            "      create the least-privilege application user."
+            "\n[6/7] Skipping bank_app user creation: DB_APP_PASSWORD not set.\n"
+            "      Set DB_APP_PASSWORD in environment/.env and re-run to create\n"
+            "      the least-privilege application user."
         )
         return
 
+    mysql_cfg = config.get_mysql_config()
+    db_name = _validate_identifier(mysql_cfg["database"], "DB_NAME")
     print(
         f"\n[6/7] Creating least-privilege MySQL user '{DB_APP_USER}'@'{DB_APP_HOST}' ..."
     )
-    admin = pymysql.connect(
-        host=config.DB_HOST,
-        port=config.DB_PORT,
-        user=config.DB_USER,
-        password=config.DB_PASSWORD,
+    admin = mysql.connector.connect(
+        host=mysql_cfg["host"],
+        port=mysql_cfg["port"],
+        user=mysql_cfg["user"],
+        password=mysql_cfg["password"],
         autocommit=True,
         charset="utf8mb4",
     )
     try:
         with admin.cursor() as cur:
-            # Create user if not exists (idempotent)
             cur.execute(
-                f"CREATE USER IF NOT EXISTS '{DB_APP_USER}'@'{DB_APP_HOST}' "
-                f"IDENTIFIED BY %s",
-                (app_password,),
-            )
-            # Update password in case it changed
-            cur.execute(
-                f"ALTER USER '{DB_APP_USER}'@'{DB_APP_HOST}' IDENTIFIED BY %s",
-                (app_password,),
+                "CREATE USER IF NOT EXISTS %s@%s IDENTIFIED BY %s",
+                (DB_APP_USER, DB_APP_HOST, app_password),
             )
             cur.execute(
-              f"REVOKE ALL PRIVILEGES, GRANT OPTION "
-f"FROM '{DB_APP_USER}'@'{DB_APP_HOST}'"
+                "ALTER USER %s@%s IDENTIFIED BY %s",
+                (DB_APP_USER, DB_APP_HOST, app_password),
+            )
+            cur.execute(
+                "REVOKE ALL PRIVILEGES, GRANT OPTION FROM %s@%s",
+                (DB_APP_USER, DB_APP_HOST),
             )
             for table, privileges in config.APP_TABLE_GRANTS.items():
+                safe_table = _validate_identifier(table, "table")
+                if not set(privileges).issubset(_VALID_PRIVS):
+                    raise ValueError(f"Unexpected privileges for {table}: {privileges}")
                 cur.execute(
-                    f"GRANT {', '.join(privileges)} ON `{config.DB_NAME}`.`{table}` "
-                    f"TO '{DB_APP_USER}'@'{DB_APP_HOST}'"
+                    f"GRANT {', '.join(privileges)} ON `{db_name}`.`{safe_table}` "
+                    "TO %s@%s",
+                    (DB_APP_USER, DB_APP_HOST),
                 )
             cur.execute("FLUSH PRIVILEGES")
 
-            # Verify
-            cur.execute(f"SHOW GRANTS FOR '{DB_APP_USER}'@'{DB_APP_HOST}'")
+            cur.execute("SHOW GRANTS FOR %s@%s", (DB_APP_USER, DB_APP_HOST))
             grants = [r[0] for r in cur.fetchall()]
         print(f"    OK  User '{DB_APP_USER}'@'{DB_APP_HOST}' created/updated.")
         for g in grants:
             print(f"       {g}")
         print(
-            f"\n    ACTION REQUIRED: Update your .env to switch the app to bank_app:\n"
+            f"\n    ACTION REQUIRED: Update your .env to switch the app to {DB_APP_USER}:\n"
             f"      DB_USER={DB_APP_USER}\n"
-            f"      DB_PASSWORD=<same value as DB_APP_PASSWORD>\n"
-            f"    Keep root credentials only in DB_ADMIN_USER / DB_ADMIN_PASSWORD\n"
-            f"    (or remove them from .env entirely after provisioning)."
+            f"      DB_PASSWORD=<value of DB_APP_PASSWORD>"
         )
     finally:
         admin.close()
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
 if __name__ == "__main__":
     if config.DB_TYPE != "mysql":
         print(
-            f"ERROR: DB_TYPE is '{config.DB_TYPE}' in your .env.\n"
-            "       Set DB_TYPE=mysql and fill in DB_PASSWORD before running this script."
+            f"ERROR: DB_TYPE is '{config.DB_TYPE}'.\n"
+            "       Set DB_TYPE=mysql and configure MySQL environment variables before running."
         )
         sys.exit(1)
 
@@ -372,6 +351,7 @@ if __name__ == "__main__":
         verify()
         print("\n" + "=" * 60)
         print("  Setup complete! MySQL database is ready.")
+        print("  Run `python scripts/seed_demo.py` to seed demo users if needed.")
         print("=" * 60)
     except Exception as exc:
         print(f"\nERROR: {exc}")

@@ -4,7 +4,7 @@ import hashlib
 import subprocess
 
 import backup_restore
-from bank import db, transactions
+from bank import auth, db, transactions
 
 
 def _sha256(path):
@@ -21,6 +21,19 @@ def test_backup_and_restore_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_TYPE", "sqlite")
     monkeypatch.setattr(backup_restore, "BACKUP_DIR", str(tmp_path / "backups"))
     db.init_db()
+
+    conn = db.get_connection()
+    conn.execute("BEGIN")
+    cur = conn.execute(
+        "INSERT INTO Users (name, email, password_hash, role) VALUES (?, ?, ?, ?)",
+        ("Test User", "backup@test.com", auth.hash_password("Backup@123"), "user"),
+    )
+    conn.execute(
+        "INSERT INTO Accounts (user_id, balance) VALUES (?, ?)",
+        (cur.lastrowid, 50000.00),
+    )
+    conn.execute("COMMIT")
+    conn.close()
 
     original = transactions.get_account_by_id(1)["balance"]
     backup_path = backup_restore.perform_backup()

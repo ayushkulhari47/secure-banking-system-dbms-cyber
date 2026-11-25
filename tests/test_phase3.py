@@ -34,6 +34,27 @@ def test_db(tmp_path, monkeypatch):
     monkeypatch.setattr(db, "DB_PATH", temp_db)
     monkeypatch.setattr(db, "DB_TYPE", "sqlite")
     db.init_db()
+
+    pw_hash = auth.hash_password("OldPass1!")
+    conn = db.get_connection()
+    try:
+        conn.execute("BEGIN")
+        for name, email, role, bal in (
+            ("Ayush Kulhari", "ayush@bank.com", "admin", 50000.00),
+            ("Rahul Sharma", "rahul@bank.com", "user", 25000.00),
+            ("Priya Singh", "priya@bank.com", "user", 15000.00),
+        ):
+            cur = conn.execute(
+                "INSERT INTO Users (name, email, password_hash, role) VALUES (?, ?, ?, ?)",
+                (name, email, pw_hash, role),
+            )
+            conn.execute(
+                "INSERT INTO Accounts (user_id, balance) VALUES (?, ?)",
+                (cur.lastrowid, bal),
+            )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
     return temp_db
 
 
@@ -81,7 +102,7 @@ class TestChangePassword:
     def test_weak_new_password_rejected(self, test_db):
         """New password that fails policy must be rejected."""
         user = auth.get_user_by_email("rahul@bank.com")
-        ok, err = auth.change_password(user["user_id"], "rahul123", "weak")
+        ok, err = auth.change_password(user["user_id"], "OldPass1!", "weak")
         assert ok is False
         assert "policy" in err.lower() or "password" in err.lower()
 
@@ -140,7 +161,7 @@ class TestChangePassword:
         import getpass
 
         session = security.Session()
-        inputs = iter(["ayush123", "NewSecure1@Pass", "NewSecure1@Pass"])
+        inputs = iter(["OldPass1!", "NewSecure1@Pass", "NewSecure1@Pass"])
         monkeypatch.setattr(getpass, "getpass", lambda prompt="": next(inputs))
 
         user = auth.get_user_by_email("ayush@bank.com")

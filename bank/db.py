@@ -6,37 +6,29 @@ import os
 import sqlite3
 
 try:
-    import pymysql
-    import pymysql.cursors
+    import mysql.connector
 
-    HAS_PYMYSQL = True
+    HAS_MYSQL_CONNECTOR = True
 except ImportError:
-    HAS_PYMYSQL = False
+    mysql = None
+    HAS_MYSQL_CONNECTOR = False
 
-from bank.config import (
-    BASE_DIR,
-    DB_TYPE,
-    DB_PATH as CFG_DB_PATH,
-    DB_HOST,
-    DB_PORT,
-    DB_USER,
-    DB_PASSWORD,
-    DB_NAME,
-)
+from bank import config
 
 # ---------------------------------------------------------------------------
 # Connection & Database Engine Abstraction
 # ---------------------------------------------------------------------------
 
+DB_TYPE = config.DB_TYPE
 DB_PATH = (
-    CFG_DB_PATH
-    if os.path.isabs(CFG_DB_PATH)
-    else os.path.join(BASE_DIR, CFG_DB_PATH)
+    config.DB_PATH
+    if os.path.isabs(config.DB_PATH)
+    else os.path.join(config.BASE_DIR, config.DB_PATH)
 )
 
 
 class MySQLCursorWrapper:
-    """Wraps a PyMySQL cursor to provide an interface matching sqlite3."""
+    """Wraps a mysql-connector-python cursor to provide an interface matching sqlite3."""
 
     def __init__(self, cursor):
         self._cursor = cursor
@@ -55,14 +47,18 @@ class MySQLCursorWrapper:
     def fetchall(self):
         return self._cursor.fetchall()
 
+    def close(self):
+        self._cursor.close()
+
 
 class MySQLConnectionWrapper:
     """
-    Wraps a PyMySQL connection so SQL execution works consistently across SQLite and MySQL:
+    Wraps a mysql-connector-python connection so SQL execution works consistently
+    across SQLite and MySQL:
       - Automatically maps '?' placeholders to '%s'
       - Intercepts BEGIN, COMMIT, and ROLLBACK to control transactions
       - Ignores SQLite-specific PRAGMAs
-      - Provides dict-like row access via PyMySQL DictCursor
+      - Provides dict-like row access via dictionary=True buffered cursors
     """
 
     def __init__(self, raw_conn):
@@ -73,7 +69,8 @@ class MySQLConnectionWrapper:
         upper_sql = sql_clean.upper()
 
         if upper_sql == "BEGIN":
-            self._conn.begin()
+            if not self._conn.in_transaction:
+                self._conn.start_transaction()
             return None
         if upper_sql == "COMMIT":
             self._conn.commit()
@@ -85,7 +82,7 @@ class MySQLConnectionWrapper:
             return None
 
         converted_sql = sql.replace("?", "%s")
-        cursor = self._conn.cursor(pymysql.cursors.DictCursor)
+        cursor = self._conn.cursor(dictionary=True, buffered=True)
         cursor.execute(converted_sql, params)
         return MySQLCursorWrapper(cursor)
 
@@ -109,25 +106,23 @@ def _get_sqlite_connection(path: str = None) -> sqlite3.Connection:
 
 
 def get_mysql_connection():
-    """Open and return a wrapped PyMySQL connection using runtime credentials."""
-    if not HAS_PYMYSQL:
-        raise RuntimeError("PyMySQL package is not installed. Run: pip install PyMySQL")
-    try:
-        raw_conn = pymysql.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME,
-            autocommit=False,
-            cursorclass=pymysql.cursors.DictCursor,
+    """Open and return a wrapped mysql-connector-python connection."""
+    if not HAS_MYSQL_CONNECTOR:
+        raise RuntimeError(
+            "mysql-connector-python package is not installed. "
+            "Run: pip install mysql-connector-python"
         )
-        return MySQLConnectionWrapper(raw_conn)
-    except pymysql.err.OperationalError:
-        # Runtime credentials must never create databases or silently acquire
-        # administrative privileges. Provisioning belongs exclusively to
-        # setup_db.py, which uses the explicitly configured admin account.
-        raise
+    mysql_cfg = config.get_mysql_config()
+    raw_conn = mysql.connector.connect(
+        host=mysql_cfg["host"],
+        port=mysql_cfg["port"],
+        user=mysql_cfg["user"],
+        password=mysql_cfg["password"],
+        database=mysql_cfg["database"],
+        autocommit=False,
+        charset="utf8mb4",
+    )
+    return MySQLConnectionWrapper(raw_conn)
 
 
 def get_connection():
@@ -308,9 +303,9 @@ def _mysql_schema_exists(conn) -> bool:
 
 def init_db() -> None:
     """
-    Create tables and seed demo data if the database does not yet exist.
+    Create tables and apply schema migrations if needed.
     Safe to call on every startup -- IF NOT EXISTS prevents duplicates.
-    Includes automated column migrations for schema upgrades.
+    Demo users are NOT seeded here; use scripts/seed_demo.py explicitly.
     """
     conn = get_connection()
     try:
@@ -319,7 +314,6 @@ def init_db() -> None:
                 conn.executescript(MYSQL_SCHEMA_SQL)
         else:
             conn.executescript(SCHEMA_SQL)
-            # Automated column migrations for existing databases
             audit_cols = [
                 r["name"]
                 for r in conn.execute("PRAGMA table_info(Audit_Log)").fetchall()
@@ -331,7 +325,6 @@ def init_db() -> None:
             if "ip_address" not in audit_cols:
                 conn.execute("ALTER TABLE Audit_Log ADD COLUMN ip_address TEXT")
             _migrate_sqlite_alert_workflow(conn)
-        _seed_if_empty(conn)
     finally:
         conn.close()
 
@@ -399,42 +392,3 @@ def _migrate_mysql_alert_workflow(conn) -> None:
     for column, definition in definitions.items():
         if column not in columns:
             conn.execute(f"ALTER TABLE Alerts ADD COLUMN {column} {definition}")
-
-
-def _seed_if_empty(conn) -> None:
-    """
-    Insert demo users and accounts only when the Users table is empty.
-
-    DEMO CREDENTIALS (hardcoded seed only -- remove before production):
-        ayush@bank.com  / ayush123  (admin)
-        rahul@bank.com  / rahul123  (user)
-        priya@bank.com  / priya123  (user)
-    """
-    from bank.auth import hash_password
-
-    row = conn.execute("SELECT COUNT(*) AS cnt FROM Users").fetchone()
-    if row["cnt"] > 0:
-        return  # Already seeded
-
-    demo_users = [
-        ("Ayush Kulhari", "ayush@bank.com", hash_password("ayush123"), "admin"),
-        ("Rahul Sharma", "rahul@bank.com", hash_password("rahul123"), "user"),
-        ("Priya Singh", "priya@bank.com", hash_password("priya123"), "user"),
-    ]
-
-    conn.execute("BEGIN")
-    try:
-        for name, email, pw_hash, role in demo_users:
-            conn.execute(
-                "INSERT INTO Users (name, email, password_hash, role)"
-                " VALUES (?, ?, ?, ?)",
-                (name, email, pw_hash, role),
-            )
-        conn.execute("INSERT INTO Accounts (user_id, balance) VALUES (1, 50000.00)")
-        conn.execute("INSERT INTO Accounts (user_id, balance) VALUES (2, 25000.00)")
-        conn.execute("INSERT INTO Accounts (user_id, balance) VALUES (3, 15000.00)")
-        conn.execute("COMMIT")
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-

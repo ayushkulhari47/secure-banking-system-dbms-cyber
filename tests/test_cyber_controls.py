@@ -22,12 +22,33 @@ def test_db(tmp_path, monkeypatch):
     """
     Hermetic test database fixture:
     Redirects db.DB_PATH to an isolated SQLite file for each test,
-    initializes the schema, and seeds demo data.
+    initializes the schema, and seeds test users and accounts.
     """
     temp_db_path = str(tmp_path / "test_banking.db")
     monkeypatch.setattr(db, "DB_PATH", temp_db_path)
     monkeypatch.setattr(db, "DB_TYPE", "sqlite")
     db.init_db()
+
+    pw_hash = auth.hash_password("TestControl@1")
+    conn = db.get_connection()
+    try:
+        conn.execute("BEGIN")
+        for name, email, role, bal in (
+            ("Ayush Kulhari", "ayush@bank.com", "admin", 50000.00),
+            ("Rahul Sharma", "rahul@bank.com", "user", 25000.00),
+            ("Priya Singh", "priya@bank.com", "user", 15000.00),
+        ):
+            cur = conn.execute(
+                "INSERT INTO Users (name, email, password_hash, role) VALUES (?, ?, ?, ?)",
+                (name, email, pw_hash, role),
+            )
+            conn.execute(
+                "INSERT INTO Accounts (user_id, balance) VALUES (?, ?)",
+                (cur.lastrowid, bal),
+            )
+        conn.execute("COMMIT")
+    finally:
+        conn.close()
     return temp_db_path
 
 

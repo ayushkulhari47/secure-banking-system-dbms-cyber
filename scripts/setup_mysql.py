@@ -3,51 +3,59 @@ scripts/setup_mysql.py - Provision and verify MySQL database and SQL definitions
 """
 
 import os
+import re
 import sys
 
 # Ensure repository root is in sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import pymysql
-from bank import config
+import mysql.connector
+from bank import config, db
+
+_VALID_IDENT = re.compile(r"^[A-Za-z0-9_]+$")
 
 
 def main():
+    mysql_cfg = config.get_mysql_config()
+    db_name = mysql_cfg["database"]
+    if not _VALID_IDENT.fullmatch(db_name):
+        raise ValueError(f"Invalid database name: {db_name!r}")
+
     print(
-        f"Connecting to MySQL at {config.DB_HOST}:{config.DB_PORT} as {config.DB_USER}..."
+        f"Connecting to MySQL at {mysql_cfg['host']}:{mysql_cfg['port']} as {mysql_cfg['user']}..."
     )
 
     # 1. Connect without database to ensure DB exists
-    conn = pymysql.connect(
-        host=config.DB_HOST,
-        port=config.DB_PORT,
-        user=config.DB_USER,
-        password=config.DB_PASSWORD,
+    conn = mysql.connector.connect(
+        host=mysql_cfg["host"],
+        port=mysql_cfg["port"],
+        user=mysql_cfg["user"],
+        password=mysql_cfg["password"],
         autocommit=True,
+        charset="utf8mb4",
     )
     with conn.cursor() as cur:
         cur.execute(
-            f"CREATE DATABASE IF NOT EXISTS `{config.DB_NAME}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
         )
-        print(f"Database `{config.DB_NAME}` verified/created.")
+        print(f"Database `{db_name}` verified/created.")
     conn.close()
 
-    # 2. Connect to the secure_banking database
-    conn = pymysql.connect(
-        host=config.DB_HOST,
-        port=config.DB_PORT,
-        user=config.DB_USER,
-        password=config.DB_PASSWORD,
-        database=config.DB_NAME,
+    # 2. Connect to the target database
+    conn = mysql.connector.connect(
+        host=mysql_cfg["host"],
+        port=mysql_cfg["port"],
+        user=mysql_cfg["user"],
+        password=mysql_cfg["password"],
+        database=db_name,
         autocommit=True,
+        charset="utf8mb4",
     )
     cur = conn.cursor()
 
     # 3. Ensure schema tables exist (Users, Accounts, Transactions, Audit_Log, Alerts)
-    from bank import db
-
     db.init_db()
-    print("Application schema & seed verified.")
+    print("Application schema verified.")
 
     # 4. Ensure Audit_Log has ip_address column for triggers compatibility
     cur.execute("SHOW COLUMNS FROM Audit_Log LIKE 'ip_address'")
@@ -100,7 +108,6 @@ def main():
     for trig in ["after_failed_login", "after_transaction", "after_user_login"]:
         cur.execute(f"DROP TRIGGER IF EXISTS `{trig}`")
 
-    # In MySQL, self-table update in AFTER UPDATE causes error 1442; BEFORE UPDATE is the valid MySQL syntax
     cur.execute("""
     CREATE TRIGGER after_failed_login
     BEFORE UPDATE ON Users
@@ -146,7 +153,7 @@ def main():
     """)
     print("Triggers created: after_failed_login, after_transaction, after_user_login.")
 
-    # 7. Verification: Run diagnostic queries from sql/queries.sql
+    # 7. Verification: Run diagnostic query
     cur.execute("""
     SELECT u.name, u.email, u.role, a.balance
     FROM Users u
