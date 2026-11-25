@@ -140,6 +140,7 @@ def deposit(account_id: int, amount, actor_user_id: int = None) -> None:
             " VALUES (NULL, ?, ?, 'deposit')",
             (account_id, str(amt)),
         )
+        audit.log_action(actor_user_id, f"Deposited Rs{amt:.2f}", conn=conn)
         conn.execute("COMMIT")
     except Exception:
         db.safe_rollback(conn)
@@ -184,6 +185,7 @@ def withdraw(account_id: int, amount, actor_user_id: int = None) -> bool:
             " VALUES (?, NULL, ?, 'withdraw')",
             (account_id, str(amt)),
         )
+        audit.log_action(actor_user_id, f"Withdrew Rs{amt:.2f}", conn=conn)
         conn.execute("COMMIT")
         return True
     except Exception:
@@ -255,6 +257,11 @@ def transfer(
             "INSERT INTO Transactions (from_account, to_account, amount, txn_type)"
             " VALUES (?, ?, ?, 'transfer')",
             (from_account_id, to_account_id, str(amt)),
+        )
+        audit.log_action(
+            actor_user_id,
+            f"Transferred Rs{amt:.2f} to account {to_account_id}",
+            conn=conn,
         )
         conn.execute("COMMIT")
         return True
@@ -348,6 +355,12 @@ def create_pending_transfer(
             (from_account_id, to_account_id, str(amt)),
         )
         txn_id = cursor.lastrowid
+        audit.log_action(
+            actor_user_id,
+            f"Initiated transfer #{txn_id} of Rs{amt:.2f} to account {to_account_id} "
+            "(pending Maker-Checker approval)",
+            conn=conn,
+        )
         conn.execute("COMMIT")
         return txn_id
     except Exception:
@@ -450,11 +463,12 @@ def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
                 "UPDATE Transactions SET status = 'rejected' WHERE txn_id = ?",
                 (txn_id,),
             )
-            conn.execute("COMMIT")
             audit.log_action(
                 approver_user_id,
                 f"Pending transfer #{txn_id} rejected due to insufficient funds",
+                conn=conn,
             )
+            conn.execute("COMMIT")
             return False, "Insufficient balance at time of approval. Transfer rejected."
 
         new_from_balance = from_balance - txn_amount
@@ -471,11 +485,12 @@ def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
             "UPDATE Transactions SET status = 'completed' WHERE txn_id = ?",
             (txn_id,),
         )
-        conn.execute("COMMIT")
         audit.log_action(
             approver_user_id,
             f"Approved pending transfer #{txn_id} of Rs{txn_amount:.2f}",
+            conn=conn,
         )
+        conn.execute("COMMIT")
         return True, "Transfer approved and processed successfully."
     except Exception:
         db.safe_rollback(conn)
@@ -508,10 +523,12 @@ def reject_pending_transfer(
             "UPDATE Transactions SET status = 'rejected' WHERE txn_id = ?",
             (txn_id,),
         )
-        conn.execute("COMMIT")
         audit.log_action(
-            approver_user_id, f"Rejected pending transfer #{txn_id} ({reason})"
+            approver_user_id,
+            f"Rejected pending transfer #{txn_id} ({reason})",
+            conn=conn,
         )
+        conn.execute("COMMIT")
         return True, "Transfer rejected successfully."
     except Exception:
         db.safe_rollback(conn)

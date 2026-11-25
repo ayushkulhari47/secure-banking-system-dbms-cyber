@@ -35,9 +35,9 @@ def review_alert(alert_id: int, admin_user_id: int, note: str = "") -> bool:
     """Move an open alert to reviewed, with admin attribution."""
     conn = db.get_connection()
     try:
-        conn.execute("BEGIN")
+        db.begin_write_transaction(conn)
         if not db._is_admin(conn, admin_user_id):
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         cursor = conn.execute(
@@ -46,13 +46,13 @@ def review_alert(alert_id: int, admin_user_id: int, note: str = "") -> bool:
             (admin_user_id, now, note, alert_id),
         )
         if getattr(cursor, "rowcount", 1) != 1:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False
+        audit.log_action(admin_user_id, f"Admin reviewed alert #{alert_id}", conn=conn)
         conn.execute("COMMIT")
-        audit.log_action(admin_user_id, f"Admin reviewed alert #{alert_id}")
         return True
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(conn)
         raise
     finally:
         conn.close()
@@ -62,9 +62,9 @@ def close_alert(alert_id: int, admin_user_id: int, note: str = "") -> bool:
     """Close a reviewed alert; an open alert must be reviewed first."""
     conn = db.get_connection()
     try:
-        conn.execute("BEGIN")
+        db.begin_write_transaction(conn)
         if not db._is_admin(conn, admin_user_id):
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         cursor = conn.execute(
@@ -74,13 +74,13 @@ def close_alert(alert_id: int, admin_user_id: int, note: str = "") -> bool:
             (admin_user_id, now, note, note, alert_id),
         )
         if getattr(cursor, "rowcount", 1) != 1:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False
+        audit.log_action(admin_user_id, f"Admin closed alert #{alert_id}", conn=conn)
         conn.execute("COMMIT")
-        audit.log_action(admin_user_id, f"Admin closed alert #{alert_id}")
         return True
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(conn)
         raise
     finally:
         conn.close()

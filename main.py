@@ -92,7 +92,6 @@ def do_deposit(user_id: int, session: Session) -> None:
         return
 
     transactions.deposit(acc["account_id"], amount, actor_user_id=user_id)
-    audit.log_action(user_id, f"Deposited Rs{amount:.2f}")
     _record_transaction_signals(user_id, "Deposit")
     updated = transactions.get_account_by_user(user_id)
     print(f"Rs{amount:.2f} deposited!  New balance: Rs{updated['balance']:.2f}")
@@ -118,7 +117,6 @@ def do_withdraw(user_id: int, session: Session) -> None:
 
     success = transactions.withdraw(acc["account_id"], amount, actor_user_id=user_id)
     if success:
-        audit.log_action(user_id, f"Withdrew Rs{amount:.2f}")
         _record_transaction_signals(user_id, "Withdrawal")
         if amount > LARGE_TXN_THRESHOLD:
             alerts.raise_alert(
@@ -178,11 +176,6 @@ def do_transfer(user_id: int, session: Session) -> None:
             audit.log_action(user_id, f"Rejected pending transfer attempt -- {exc}")
             session.refresh()
             return
-        audit.log_action(
-            user_id,
-            f"Initiated transfer #{txn_id} of Rs{amount:.2f} to account {to_acc_id} "
-            "(pending Maker-Checker approval)",
-        )
         alerts.raise_alert(
             user_id,
             "Large Transaction Pending Approval",
@@ -208,7 +201,6 @@ def do_transfer(user_id: int, session: Session) -> None:
         acc["account_id"], to_acc_id, amount, actor_user_id=user_id
     )
     if success:
-        audit.log_action(user_id, f"Transferred Rs{amount:.2f} to account {to_acc_id}")
         _record_transaction_signals(user_id, "Transfer")
         updated = transactions.get_account_by_user(user_id)
         print(f"Rs{amount:.2f} transferred!  New balance: Rs{updated['balance']:.2f}")

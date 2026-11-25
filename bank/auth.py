@@ -188,18 +188,18 @@ def change_password(
             return False, "New password must be different from the current password."
 
         new_hash = hash_password(new_password)
-        conn.execute("BEGIN")
+        db.begin_write_transaction(conn)
         try:
             conn.execute(
                 "UPDATE Users SET password_hash = ? WHERE user_id = ?",
                 (new_hash, user_id),
             )
+            audit.log_action(user_id, "Password changed successfully", conn=conn)
             conn.execute("COMMIT")
         except Exception:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             raise
 
-        audit.log_action(user_id, "Password changed successfully")
         return True, None
     finally:
         conn.close()
@@ -212,28 +212,29 @@ def unlock_user(user_id: int, admin_user_id: int = None) -> bool:
     """
     conn = db.get_connection()
     try:
-        conn.execute("BEGIN")
+        db.begin_write_transaction(conn)
         if not db._is_admin(conn, admin_user_id):
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False
         user = conn.execute(
             "SELECT * FROM Users WHERE user_id = ?", (user_id,)
         ).fetchone()
         if not user:
-            conn.execute("ROLLBACK")
+            db.safe_rollback(conn)
             return False
         conn.execute(
             "UPDATE Users SET is_locked = 0, failed_attempts = 0 WHERE user_id = ?",
             (user_id,),
         )
-        conn.execute("COMMIT")
         audit.log_action(
             admin_user_id,
             f"Admin unlocked account for user #{user_id} ({user['email']})",
+            conn=conn,
         )
+        conn.execute("COMMIT")
         return True
     except Exception:
-        conn.execute("ROLLBACK")
+        db.safe_rollback(conn)
         raise
     finally:
         conn.close()
