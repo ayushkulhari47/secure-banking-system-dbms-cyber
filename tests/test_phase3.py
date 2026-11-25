@@ -11,6 +11,7 @@ Covers:
 Run: pytest tests/test_phase3.py -v
 """
 
+from decimal import Decimal
 import time
 import pytest
 import bcrypt
@@ -359,7 +360,7 @@ class TestTransferAtomic:
         acc2 = transactions.get_account_by_user(2)
         total_before = acc1["balance"] + acc2["balance"]
 
-        amount = 100.00
+        amount = Decimal("100.00")
         ok = transactions.transfer(
             acc1["account_id"], acc2["account_id"], amount, actor_user_id=1
         )
@@ -377,7 +378,7 @@ class TestTransferAtomic:
         acc2 = transactions.get_account_by_user(2)
 
         ok = transactions.transfer(
-            acc1["account_id"], acc2["account_id"], 999_999.00, actor_user_id=1
+            acc1["account_id"], acc2["account_id"], Decimal("999999.00"), actor_user_id=1
         )
         assert ok is False
 

@@ -2,14 +2,15 @@
 bank/security.py -- Input validation, password policy, session timeout, and intrusion helpers.
 
 Controls implemented:
-  SEC-01  validate_amount()       -- rejects zero, negative, NaN, infinite
-  SEC-02  safe_float_input()      -- wraps input() so bad input never crashes
-  SEC-03  safe_int_input()        -- same for integers
+  SEC-01  validate_amount() / to_decimal() -- Decimal monetary validation
+  SEC-02  safe_decimal_input() / safe_float_input() -- safe numeric CLI wrappers
+  SEC-03  safe_int_input()        -- safe integer CLI wrapper
   SEC-04  password_meets_policy() -- minimum complexity enforcement
   SEC-05  Session                 -- inactivity timeout detection
   SEC-07  detect_sqli() / check_velocity() / is_odd_hour()
 """
 
+from decimal import Decimal, InvalidOperation
 import math
 import re
 import time
@@ -22,30 +23,90 @@ from bank.config import (
     MIN_PASSWORD_LENGTH,
 )
 
+MONEY_QUANTIZER = Decimal("0.01")
+
 # ---------------------------------------------------------------------------
-# SEC-01  Amount validation
+# SEC-01  Decimal conversion and amount validation
 # ---------------------------------------------------------------------------
 
 
-def validate_amount(amount: float) -> tuple:
+def parse_money_input(amount) -> Decimal:
     """
-    Return (True, None) if amount is acceptable, or (False, reason_string).
+    Convert a user/caller monetary value to Decimal without silent rounding.
+
+    Rejects booleans, None, non-numeric strings, NaN, Infinity, and unsupported types.
+    Raises ValueError on invalid input.
+    """
+    if isinstance(amount, bool) or amount is None:
+        raise ValueError("Amount must be a valid numeric value.")
+
+    if isinstance(amount, Decimal):
+        dec = amount
+    elif isinstance(amount, int):
+        dec = Decimal(amount)
+    elif isinstance(amount, float):
+        if math.isnan(amount):
+            raise ValueError("Amount must be a valid number (NaN rejected).")
+        if math.isinf(amount):
+            raise ValueError("Amount must be finite (infinity rejected).")
+        dec = Decimal(str(amount))
+    elif isinstance(amount, str):
+        stripped = amount.strip()
+        if not stripped:
+            raise ValueError("Amount must be a valid number.")
+        try:
+            dec = Decimal(stripped)
+        except InvalidOperation as exc:
+            raise ValueError("Amount must be a valid number.") from exc
+    else:
+        raise ValueError("Amount must be a valid numeric value.")
+
+    if dec.is_nan():
+        raise ValueError("Amount must be a valid number (NaN rejected).")
+    if dec.is_infinite():
+        raise ValueError("Amount must be finite (infinity rejected).")
+    return dec
+
+
+def db_to_decimal(value) -> Decimal:
+    """
+    Safely convert a monetary value fetched from the database to Decimal('0.01').
+    Rejects non-numeric, non-finite, or over-precise values.
+    """
+    dec = parse_money_input(value)
+    exp = dec.as_tuple().exponent
+    if isinstance(exp, int) and exp < -2:
+        raise ValueError(
+            f"Database monetary value cannot exceed two decimal places: {value!r}"
+        )
+    return dec.quantize(MONEY_QUANTIZER)
+
+
+def validate_amount(amount) -> tuple:
+    """
+    Return (True, None) if amount is an acceptable monetary value,
+    or (False, reason_string).
 
     Rules enforced:
-      - Not NaN  (float('nan') can appear via certain string coercions)
-      - Not infinite
-      - Greater than MIN_AMOUNT (blocks zero and negative values)
-      - Not greater than MAX_AMOUNT (blocks unrealistic inputs)
+      - Numeric (Decimal, int, finite float, or numeric string; rejects bool/invalid str)
+      - Not NaN or infinite
+      - No more than two decimal places (never silently rounded)
+      - Strictly positive and >= MIN_AMOUNT (0.01)
+      - <= MAX_AMOUNT (1,000,000.00)
     """
-    if math.isnan(amount):
-        return False, "Amount must be a valid number (NaN rejected)."
-    if math.isinf(amount):
-        return False, "Amount must be finite (infinity rejected)."
-    if amount <= 0:
-        return False, f"Amount must be greater than Rs0.00 (got Rs{amount:.2f})."
-    if amount < MIN_AMOUNT:
+    try:
+        dec = parse_money_input(amount)
+    except ValueError as exc:
+        return False, str(exc)
+
+    exp = dec.as_tuple().exponent
+    if isinstance(exp, int) and exp < -2:
+        return False, "Amount cannot have more than two decimal places."
+    if dec <= Decimal("0"):
+        return False, f"Amount must be greater than Rs0.00 (got Rs{dec:.2f})."
+    if dec < MIN_AMOUNT:
         return False, f"Minimum transaction amount is Rs{MIN_AMOUNT:.2f}."
-    if amount > MAX_AMOUNT:
+    if dec > MAX_AMOUNT:
         return False, f"Single transaction limit is Rs{MAX_AMOUNT:,.2f}."
     return True, None
 
@@ -55,11 +116,26 @@ def validate_amount(amount: float) -> tuple:
 # ---------------------------------------------------------------------------
 
 
+def safe_decimal_input(prompt: str) -> Optional[Decimal]:
+    """
+    Display prompt, read a line, and return a Decimal without silent rounding.
+    Returns None if the input is not a valid finite decimal number.
+    """
+    raw = input(prompt).strip()
+    try:
+        dec = parse_money_input(raw)
+        return dec
+    except ValueError:
+        print(
+            f"  [!] Invalid input: '{raw}' is not a valid number. Please enter a numeric value."
+        )
+        return None
+
+
 def safe_float_input(prompt: str) -> Optional[float]:
     """
     Display prompt, read a line, and return a float.
-    Returns None if the input cannot be converted -- the caller decides
-    what to do (typically print an error and return without crashing).
+    Kept for backward compatibility; monetary flows should use safe_decimal_input().
     """
     raw = input(prompt).strip()
     try:
@@ -95,13 +171,6 @@ def password_meets_policy(password: str) -> tuple:
     """
     Return (True, None) if the password satisfies the policy,
     or (False, list_of_violations).
-
-    Policy (ISO 27001 A.9.4.3 -- password management):
-      - Minimum 8 characters
-      - At least one uppercase letter
-      - At least one lowercase letter
-      - At least one digit
-      - At least one special character from: !@#$%^&*()-_=+[]{}|;:',.<>?/`~
     """
     violations = []
 
@@ -130,9 +199,7 @@ def password_meets_policy(password: str) -> tuple:
 
 
 class Session:
-    """
-    Tracks the time of the last user interaction.
-    """
+    """Tracks the time of the last user interaction."""
 
     def __init__(self, timeout_seconds: int = SESSION_TIMEOUT_SECONDS) -> None:
         self.timeout = timeout_seconds
@@ -156,7 +223,6 @@ class Session:
 # SEC-07  Intrusion Detection Rules
 # ---------------------------------------------------------------------------
 
-# SQL injection payload patterns (OWASP Top 10 A03:2021 -- Injection)
 _SQLI_PATTERNS = re.compile(
     r"('|\b(OR|AND)\b.*=.*|--|;|/\*|\*/|xp_|UNION\s+SELECT|"
     r"DROP\s+TABLE|INSERT\s+INTO|SELECT\s+\*|1\s*=\s*1|"
@@ -164,15 +230,12 @@ _SQLI_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Velocity: maximum transactions within a rolling window (intrusion signal)
-VELOCITY_WINDOW_SECONDS: int = 60  # rolling window
-VELOCITY_MAX_TRANSACTIONS: int = 10  # alert if exceeded in window
+VELOCITY_WINDOW_SECONDS: int = 60
+VELOCITY_MAX_TRANSACTIONS: int = 10
 
 
 def detect_sqli(user_input: str) -> bool:
-    """
-    Return True if the string matches common SQL injection patterns.
-    """
+    """Return True if the string matches common SQL injection patterns."""
     return bool(_SQLI_PATTERNS.search(user_input))
 
 
@@ -201,4 +264,3 @@ def is_odd_hour(timestamp=None) -> bool:
     moment = timestamp or datetime.now(timezone.utc)
     hour = moment.hour
     return hour >= 23 or hour < 6
-

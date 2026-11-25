@@ -6,6 +6,7 @@ Passwords are never hardcoded in source code. Each account password is read
 from its environment variable when set, or requested interactively via getpass.
 """
 
+from decimal import Decimal
 import getpass
 import os
 import sys
@@ -20,21 +21,21 @@ DEMO_ACCOUNTS = [
         "name": "Ayush Kulhari",
         "email": "ayush@bank.com",
         "role": "admin",
-        "balance": 50000.00,
+        "balance": Decimal("50000.00"),
         "env_var": "DEMO_ADMIN_PASSWORD",
     },
     {
         "name": "Rahul Sharma",
         "email": "rahul@bank.com",
         "role": "user",
-        "balance": 25000.00,
+        "balance": Decimal("25000.00"),
         "env_var": "DEMO_RAHUL_PASSWORD",
     },
     {
         "name": "Priya Singh",
         "email": "priya@bank.com",
         "role": "user",
-        "balance": 15000.00,
+        "balance": Decimal("15000.00"),
         "env_var": "DEMO_PRIYA_PASSWORD",
     },
 ]
@@ -90,7 +91,7 @@ def seed_demo_users() -> int:
                 )
                 conn.execute(
                     "INSERT INTO Accounts (user_id, balance) VALUES (?, ?)",
-                    (cur.lastrowid, balance),
+                    (cur.lastrowid, str(balance)),
                 )
             conn.execute("COMMIT")
         except Exception:

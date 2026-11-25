@@ -13,7 +13,7 @@ from bank.config import (
 )
 from bank.security import (
     Session,
-    safe_float_input,
+    safe_decimal_input,
     safe_int_input,
     validate_amount,
 )
@@ -81,9 +81,9 @@ def do_deposit(user_id: int, session: Session) -> None:
         print("No account found.")
         return
 
-    amount = safe_float_input("Enter deposit amount (Rs): ")
+    amount = safe_decimal_input("Enter deposit amount (Rs): ")
     if amount is None:
-        return  # safe_float_input already printed an error
+        return  # safe_decimal_input already printed an error
 
     ok, reason = validate_amount(amount)
     if not ok:
@@ -106,7 +106,7 @@ def do_withdraw(user_id: int, session: Session) -> None:
         print("No account found.")
         return
 
-    amount = safe_float_input("Enter withdrawal amount (Rs): ")
+    amount = safe_decimal_input("Enter withdrawal amount (Rs): ")
     if amount is None:
         return
 
@@ -157,7 +157,7 @@ def do_transfer(user_id: int, session: Session) -> None:
         print("Destination account not found!")
         return
 
-    amount = safe_float_input("Enter transfer amount (Rs): ")
+    amount = safe_decimal_input("Enter transfer amount (Rs): ")
     if amount is None:
         return
 

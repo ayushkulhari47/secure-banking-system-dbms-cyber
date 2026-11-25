@@ -49,8 +49,8 @@ def mem_conn():
         CREATE TABLE Accounts (
             account_id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id    INTEGER NOT NULL REFERENCES Users(user_id),
-            balance    REAL    NOT NULL DEFAULT 0.00
-                               CHECK(balance >= 0),
+            balance    DECIMAL(12,2) NOT NULL DEFAULT 0.00
+                               CHECK(balance >= 0 AND ROUND(balance, 2) = balance),
             created_at TEXT    NOT NULL DEFAULT (datetime('now'))
         );
 
@@ -58,7 +58,8 @@ def mem_conn():
             txn_id       INTEGER PRIMARY KEY AUTOINCREMENT,
             from_account INTEGER REFERENCES Accounts(account_id),
             to_account   INTEGER REFERENCES Accounts(account_id),
-            amount       REAL    NOT NULL CHECK(amount > 0),
+            amount       DECIMAL(12,2) NOT NULL
+                                 CHECK(amount > 0 AND ROUND(amount, 2) = amount),
             txn_type     TEXT    NOT NULL
                                  CHECK(txn_type IN ('deposit','withdraw','transfer')),
             status       TEXT    NOT NULL DEFAULT 'completed'
@@ -138,6 +139,16 @@ class TestSchema:
                 "INSERT INTO Transactions (to_account, amount, txn_type)"
                 " VALUES (1, 0, 'deposit')"
             )
+
+    def test_more_than_two_decimal_places_rejected_at_db_layer(self, mem_conn):
+        """SQLite CHECK constraints enforce at most two decimal places."""
+        with pytest.raises(sqlite3.IntegrityError):
+            mem_conn.execute(
+                "INSERT INTO Transactions (to_account, amount, txn_type)"
+                " VALUES (1, 10.123, 'deposit')"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            mem_conn.execute("UPDATE Accounts SET balance = 50.999 WHERE account_id = 1")
 
     def test_role_enum_enforced(self, mem_conn):
         """Only 'admin' or 'user' are valid role values."""

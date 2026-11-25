@@ -11,6 +11,7 @@ Covers IT Audit & Cyber Risk Controls:
 Run: pytest tests/test_cyber_controls.py -v
 """
 
+from decimal import Decimal
 import os
 import pytest
 
@@ -70,12 +71,12 @@ class TestCentralizedConfiguration:
         assert hasattr(config, "BCRYPT_ROUNDS")
 
     def test_configuration_values_within_safe_bounds(self):
-        assert config.LARGE_TXN_THRESHOLD == 50_000.00
+        assert config.LARGE_TXN_THRESHOLD == Decimal("50000.00")
         assert config.MAX_FAILED_LOGINS == 3
         assert config.SESSION_TIMEOUT_SECONDS == 300
         assert config.MIN_PASSWORD_LENGTH == 8
-        assert config.MIN_AMOUNT == 0.01
-        assert config.MAX_AMOUNT == 1_000_000.00
+        assert config.MIN_AMOUNT == Decimal("0.01")
+        assert config.MAX_AMOUNT == Decimal("1000000.00")
         assert config.BCRYPT_ROUNDS == 12
 
     def test_database_configuration_constants_exist(self):

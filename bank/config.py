@@ -8,6 +8,7 @@ Design Decision (IT Audit / Compliance Perspective):
   no hardcoded default credentials.
 """
 
+from decimal import Decimal
 import os
 import sys
 
@@ -125,13 +126,13 @@ APP_TABLE_GRANTS: dict = {
 }
 
 # ---------------------------------------------------------------------------
-# Transaction Thresholds
+# Transaction Thresholds (Decimal for exact currency arithmetic)
 # ---------------------------------------------------------------------------
-MIN_AMOUNT: float = 0.01  # Smallest allowed currency amount (Rs)
-MAX_AMOUNT: float = 1_000_000.00  # Application-layer upper cap per transaction (Rs)
-LARGE_TXN_THRESHOLD: float = (
-    50_000.00  # Transactions above this require Maker-Checker dual control
-)
+MIN_AMOUNT: Decimal = Decimal("0.01")  # Smallest allowed currency amount (Rs)
+MAX_AMOUNT: Decimal = Decimal("1000000.00")  # Application-layer upper cap (Rs)
+LARGE_TXN_THRESHOLD: Decimal = Decimal(
+    "50000.00"
+)  # Transactions above this require Maker-Checker dual control
 
 # ---------------------------------------------------------------------------
 # Authentication & Access Control

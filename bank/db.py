@@ -176,8 +176,8 @@ CREATE TABLE IF NOT EXISTS Users (
 CREATE TABLE IF NOT EXISTS Accounts (
     account_id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL UNIQUE REFERENCES Users(user_id),
-    balance    REAL    NOT NULL DEFAULT 0.00
-                       CHECK(balance >= 0),
+    balance    DECIMAL(12,2) NOT NULL DEFAULT 0.00
+                       CHECK(balance >= 0 AND ROUND(balance, 2) = balance),
     created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -185,7 +185,8 @@ CREATE TABLE IF NOT EXISTS Transactions (
     txn_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     from_account INTEGER REFERENCES Accounts(account_id),
     to_account   INTEGER REFERENCES Accounts(account_id),
-    amount       REAL    NOT NULL CHECK(amount > 0),
+    amount       DECIMAL(12,2) NOT NULL
+                         CHECK(amount > 0 AND ROUND(amount, 2) = amount),
     txn_type     TEXT    NOT NULL
                          CHECK(txn_type IN ('deposit','withdraw','transfer')),
     status       TEXT    NOT NULL DEFAULT 'completed'
@@ -237,7 +238,7 @@ CREATE TABLE IF NOT EXISTS Users (
 CREATE TABLE IF NOT EXISTS Accounts (
     account_id INT AUTO_INCREMENT PRIMARY KEY,
     user_id    INT NOT NULL UNIQUE,
-    balance    DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+    balance    DECIMAL(12,2) NOT NULL DEFAULT 0.00,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES Users(user_id) ON DELETE CASCADE,
     CHECK (balance >= 0)
@@ -247,7 +248,7 @@ CREATE TABLE IF NOT EXISTS Transactions (
     txn_id       INT AUTO_INCREMENT PRIMARY KEY,
     from_account INT NULL,
     to_account   INT NULL,
-    amount       DECIMAL(15,2) NOT NULL,
+    amount       DECIMAL(12,2) NOT NULL,
     txn_type     ENUM('deposit','withdraw','transfer') NOT NULL,
     status       ENUM('completed','pending','rejected') NOT NULL DEFAULT 'completed',
     txn_time     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,

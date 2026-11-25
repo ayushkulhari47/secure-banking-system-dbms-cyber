@@ -30,8 +30,8 @@ CREATE TABLE IF NOT EXISTS Users (
 CREATE TABLE IF NOT EXISTS Accounts (
     account_id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id    INTEGER NOT NULL UNIQUE REFERENCES Users(user_id),
-    balance    REAL    NOT NULL DEFAULT 0.00
-                       CHECK(balance >= 0),     -- prevents overdraft at DB level
+    balance    DECIMAL(12,2) NOT NULL DEFAULT 0.00
+                       CHECK(balance >= 0 AND ROUND(balance, 2) = balance), -- prevents overdraft and >2 decimals
     created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS Transactions (
     txn_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     from_account INTEGER REFERENCES Accounts(account_id),  -- NULL for deposits
     to_account   INTEGER REFERENCES Accounts(account_id),  -- NULL for withdrawals
-    amount       REAL    NOT NULL CHECK(amount > 0),        -- negative amounts blocked at DB level
+    amount       DECIMAL(12,2) NOT NULL
+                         CHECK(amount > 0 AND ROUND(amount, 2) = amount), -- negative and >2 decimal amounts blocked
     txn_type     TEXT    NOT NULL
                          CHECK(txn_type IN ('deposit','withdraw','transfer')),
     status       TEXT    NOT NULL DEFAULT 'completed'
