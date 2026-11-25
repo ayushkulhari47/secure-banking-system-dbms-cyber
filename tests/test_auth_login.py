@@ -238,6 +238,7 @@ class TestDemoPasswordPolicyAndSourceHygiene:
         sha256_allowed_files = {
             "audit.py",
             "backup_restore.py",
+            "db.py",
             "test_backup_restore.py",
             "test_security_fixes.py",
         }

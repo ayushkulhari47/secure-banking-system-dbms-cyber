@@ -79,8 +79,9 @@ class TestAtomicAuditLogging:
 
         assert conn_count["n"] == 1
         logs = audit.get_audit_log(admin_user_id=1)
-        assert len(logs) == 1
-        assert "Transferred Rs250.00 to account 3" in logs[0]["action"]
+        assert len(logs) == 2
+        assert any("Account #2 balance updated" in row["action"] for row in logs)
+        assert any("Account #3 balance updated" in row["action"] for row in logs)
         assert audit.verify_audit_log_integrity(admin_user_id=1) == (True, None)
 
     def test_financial_rollback_also_removes_audit_row(self, audit_db, monkeypatch):
@@ -119,9 +120,10 @@ class TestAtomicAuditLogging:
         assert ok is True
 
         logs = audit.get_audit_log(admin_user_id=1)
-        assert len(logs) == 2
-        assert "Approved pending transfer" in logs[0]["action"]
-        assert "Initiated transfer" in logs[1]["action"]
+        assert len(logs) == 3
+        assert any("Account #2 balance updated" in row["action"] for row in logs)
+        assert any("Account #3 balance updated" in row["action"] for row in logs)
+        assert "Initiated transfer" in logs[2]["action"]
         assert audit.verify_audit_log_integrity(admin_user_id=1) == (True, None)
 
 
@@ -144,8 +146,9 @@ class TestTamperDetectionAndFailClosedAudit:
         audit.log_action(2, "Step B")
         audit.log_action(3, "Step C")
 
-        # 1. Tamper with entry_hash on row 3
+        # Simulate offline/trigger-bypass tampering on historical rows
         conn = db.get_connection()
+        conn.execute("DROP TRIGGER IF EXISTS prevent_audit_log_update")
         conn.execute(
             "UPDATE Audit_Log SET entry_hash = ? WHERE log_id = 3", ("f" * 64,)
         )

@@ -141,8 +141,9 @@ class TestTamperEvidentAuditLog:
         audit.log_action(2, "Password change")
         audit.log_action(3, "Account view")
 
-        # Attacker modifies the second entry directly in SQLite
+        # Simulate an offline/privileged tamper that bypassed the DB append-only trigger
         conn = db.get_connection()
+        conn.execute("DROP TRIGGER IF EXISTS prevent_audit_log_update")
         conn.execute(
             "UPDATE Audit_Log SET action = 'Falsified record' WHERE log_id = 2"
         )
@@ -160,8 +161,9 @@ class TestTamperEvidentAuditLog:
         audit.log_action(1, "Step 2")
         audit.log_action(1, "Step 3")
 
-        # Attacker falsifies the previous_hash link
+        # Simulate an offline/privileged tamper that bypassed the DB append-only trigger
         conn = db.get_connection()
+        conn.execute("DROP TRIGGER IF EXISTS prevent_audit_log_update")
         conn.execute(
             "UPDATE Audit_Log SET previous_hash = 'badhash123' WHERE log_id = 3"
         )

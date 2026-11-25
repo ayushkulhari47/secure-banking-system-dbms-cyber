@@ -140,7 +140,6 @@ def deposit(account_id: int, amount, actor_user_id: int = None) -> None:
             " VALUES (NULL, ?, ?, 'deposit')",
             (account_id, str(amt)),
         )
-        audit.log_action(actor_user_id, f"Deposited Rs{amt:.2f}", conn=conn)
         conn.execute("COMMIT")
     except Exception:
         db.safe_rollback(conn)
@@ -185,7 +184,6 @@ def withdraw(account_id: int, amount, actor_user_id: int = None) -> bool:
             " VALUES (?, NULL, ?, 'withdraw')",
             (account_id, str(amt)),
         )
-        audit.log_action(actor_user_id, f"Withdrew Rs{amt:.2f}", conn=conn)
         conn.execute("COMMIT")
         return True
     except Exception:
@@ -257,11 +255,6 @@ def transfer(
             "INSERT INTO Transactions (from_account, to_account, amount, txn_type)"
             " VALUES (?, ?, ?, 'transfer')",
             (from_account_id, to_account_id, str(amt)),
-        )
-        audit.log_action(
-            actor_user_id,
-            f"Transferred Rs{amt:.2f} to account {to_account_id}",
-            conn=conn,
         )
         conn.execute("COMMIT")
         return True
@@ -484,11 +477,6 @@ def approve_pending_transfer(txn_id: int, approver_user_id: int) -> tuple:
         conn.execute(
             "UPDATE Transactions SET status = 'completed' WHERE txn_id = ?",
             (txn_id,),
-        )
-        audit.log_action(
-            approver_user_id,
-            f"Approved pending transfer #{txn_id} of Rs{txn_amount:.2f}",
-            conn=conn,
         )
         conn.execute("COMMIT")
         return True, "Transfer approved and processed successfully."

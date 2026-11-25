@@ -85,3 +85,59 @@ CREATE TABLE IF NOT EXISTS Alerts (
     closed_at   TEXT,
     resolution_note TEXT
 );
+
+-- Balance-change audit trigger (requires sha256_hex registered on connection).
+CREATE TRIGGER IF NOT EXISTS after_accounts_balance_update
+AFTER UPDATE OF balance ON Accounts
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'Audit_Log chain is corrupted or missing hash fields')
+    WHERE EXISTS (SELECT 1 FROM Audit_Log)
+      AND (
+        (SELECT previous_hash FROM Audit_Log ORDER BY log_id DESC LIMIT 1) IS NULL
+        OR (SELECT entry_hash FROM Audit_Log ORDER BY log_id DESC LIMIT 1) IS NULL
+        OR LENGTH((SELECT previous_hash FROM Audit_Log ORDER BY log_id DESC LIMIT 1)) != 64
+        OR LENGTH((SELECT entry_hash FROM Audit_Log ORDER BY log_id DESC LIMIT 1)) != 64
+        OR (SELECT entry_hash FROM Audit_Log ORDER BY log_id DESC LIMIT 1) != sha256_hex(
+            (SELECT previous_hash FROM Audit_Log ORDER BY log_id DESC LIMIT 1)
+            || '|' || COALESCE(CAST((SELECT user_id FROM Audit_Log ORDER BY log_id DESC LIMIT 1) AS TEXT), 'None')
+            || '|' || (SELECT action FROM Audit_Log ORDER BY log_id DESC LIMIT 1)
+            || '|' || (SELECT log_time FROM Audit_Log ORDER BY log_id DESC LIMIT 1)
+        )
+      );
+
+    INSERT INTO Audit_Log (user_id, action, log_time, previous_hash, entry_hash)
+    SELECT
+        v.user_id,
+        v.action,
+        v.log_time,
+        v.prev_hash,
+        sha256_hex(v.prev_hash || '|' || v.user_id || '|' || v.action || '|' || v.log_time)
+    FROM (
+        SELECT
+            NEW.user_id AS user_id,
+            'Account #' || NEW.account_id || ' balance updated: Rs'
+            || printf('%.2f', OLD.balance) || ' -> Rs' || printf('%.2f', NEW.balance) AS action,
+            datetime('now') AS log_time,
+            CASE
+                WHEN NOT EXISTS (SELECT 1 FROM Audit_Log)
+                THEN '0000000000000000000000000000000000000000000000000000000000000000'
+                ELSE (SELECT entry_hash FROM Audit_Log ORDER BY log_id DESC LIMIT 1)
+            END AS prev_hash
+    ) AS v;
+END;
+
+-- Append-only Audit_Log protection triggers.
+CREATE TRIGGER IF NOT EXISTS prevent_audit_log_update
+BEFORE UPDATE ON Audit_Log
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'Audit_Log is append-only: UPDATE is prohibited');
+END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_audit_log_delete
+BEFORE DELETE ON Audit_Log
+FOR EACH ROW
+BEGIN
+    SELECT RAISE(ABORT, 'Audit_Log is append-only: DELETE is prohibited');
+END;

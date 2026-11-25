@@ -183,19 +183,23 @@ def create_stored_procedures():
 
 
 # ---------------------------------------------------------------------------
-# Step 5 -- Remove legacy audit-writing triggers
+# Step 5 -- Install tamper-resistant audit triggers and remove legacy ones
 # ---------------------------------------------------------------------------
 
 
 def create_triggers():
-    print("\n[5/6] Removing legacy audit-writing triggers ...")
+    print("\n[5/6] Installing tamper-resistant audit triggers ...")
     conn = _raw_conn()
     try:
         with conn.cursor() as cur:
-            for name in ("after_failed_login", "after_transaction", "after_user_login"):
+            for name in db.LEGACY_MYSQL_TRIGGERS:
                 cur.execute(f"DROP TRIGGER IF EXISTS `{name}`")
+            for name, trigger_sql in db.MYSQL_AUDIT_TRIGGERS:
+                cur.execute(f"DROP TRIGGER IF EXISTS `{name}`")
+                cur.execute(trigger_sql)
         print(
-            "    OK  Legacy triggers removed; Python transaction layer is authoritative."
+            "    OK  Installed triggers: "
+            + ", ".join(name for name, _ in db.MYSQL_AUDIT_TRIGGERS)
         )
     finally:
         conn.close()

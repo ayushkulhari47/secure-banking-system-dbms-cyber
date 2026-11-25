@@ -104,54 +104,17 @@ def main():
     """)
     print("Stored procedures created: deposit, withdraw, transfer.")
 
-    # 6. Triggers from sql/triggers.sql
-    for trig in ["after_failed_login", "after_transaction", "after_user_login"]:
+    # 6. Install tamper-resistant audit triggers and drop legacy unhashed triggers
+    for trig in db.LEGACY_MYSQL_TRIGGERS:
         cur.execute(f"DROP TRIGGER IF EXISTS `{trig}`")
-
-    cur.execute("""
-    CREATE TRIGGER after_failed_login
-    BEFORE UPDATE ON Users
-    FOR EACH ROW
-    BEGIN
-        IF NEW.failed_attempts >= 3 THEN
-            SET NEW.is_locked = 1;
-            INSERT INTO Alerts (user_id, alert_type, description)
-            VALUES (NEW.user_id, 'Brute Force', 'Account locked after 3 failed login attempts');
-        END IF;
-    END
-    """)
-
-    cur.execute("""
-    CREATE TRIGGER after_transaction
-    AFTER INSERT ON Transactions
-    FOR EACH ROW
-    BEGIN
-        INSERT INTO Audit_Log (user_id, action, ip_address)
-        SELECT a.user_id, CONCAT('Transaction of ', NEW.amount, ' type: ', NEW.txn_type), '0.0.0.0'
-        FROM Accounts a
-        WHERE a.account_id = NEW.from_account;
-
-        IF NEW.amount > 50000 THEN
-            INSERT INTO Alerts (user_id, alert_type, description)
-            SELECT a.user_id, 'Large Transaction', CONCAT('Suspicious large transaction of ', NEW.amount)
-            FROM Accounts a
-            WHERE a.account_id = NEW.from_account;
-        END IF;
-    END
-    """)
-
-    cur.execute("""
-    CREATE TRIGGER after_user_login
-    AFTER UPDATE ON Users
-    FOR EACH ROW
-    BEGIN
-        IF NEW.failed_attempts = 0 AND OLD.failed_attempts > 0 THEN
-            INSERT INTO Audit_Log (user_id, action, ip_address)
-            VALUES (NEW.user_id, 'Successful Login', '0.0.0.0');
-        END IF;
-    END
-    """)
-    print("Triggers created: after_failed_login, after_transaction, after_user_login.")
+    for trig_name, trig_sql in db.MYSQL_AUDIT_TRIGGERS:
+        cur.execute(f"DROP TRIGGER IF EXISTS `{trig_name}`")
+        cur.execute(trig_sql)
+    print(
+        "Triggers created: "
+        + ", ".join(name for name, _ in db.MYSQL_AUDIT_TRIGGERS)
+        + "."
+    )
 
     # 7. Verification: Run diagnostic query
     cur.execute("""
